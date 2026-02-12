@@ -1,0 +1,165 @@
+function localizer_rois(subj, rootEEGdir, RERUN_ROI)
+%   this code is moved from localizer_run for readability. It does all the surface and ROI growing parts of the pipeline
+%
+%   Usage:
+%       localizer_rois(subj, rootEEGdir, RERUN_ROI)
+%
+%   Input:
+%       subj
+%       rootEEGdir
+%       RERUN_ROI   - re-save all ROI files if they exist already
+%
+%   File Output:
+%       see https://projects.ninds.nih.gov:8090/display/Home/For+Users on wiki
+
+
+
+    TOOLBOX         = 'commonFiles/eeg_toolbox';                   % eeg_toolbox directory
+    N_ROIC          = 2400;                                             % (coarse=600, fine=2400)
+    R_ROI_MAX_DIST  = 10;                                               % maximum distance to store to vertices from ROIC's
+    R_CONTACT       = 1.5;                                              % electrode contact radius (typical is 1.5mm radius)
+
+    locDirs = localizer_create_directories(subj, rootEEGdir);
+    fname_leads = fullfile(locDirs.mr_pre, 'leads.csv');
+    if ~exist(fname_leads, 'file')
+        fname_leads = fullfile(locDirs.mr_pre, '../../leads.csv');
+    end
+    leads   = readtable(fname_leads);
+    
+    fname_lead_roi_lut      = fullfile(locDirs.roi, 'lead_ROIC_LUT_monopolar.mat');
+    fname_lead_roi_lut_bp   = fullfile(locDirs.roi, 'lead_ROIC_LUT_bipolar.mat');    
+    
+    
+    % These mat's contain a variable named lead_roi_lut, which is a struct with the following fields:
+    %   chanName
+    %   x, y, and z
+    %   lead_verts - cell storing a list of mesh indices
+    %   ROIC_verts - cell storing a list of ROICs within R_ROI_MAX_DIST
+    %   ROIC_dists - cell storing a list of distances corresponding to ROIC_verts
+    
+    % Note: the data must be stored as a .mat instead of a .csv because of the comma-delimited lists [..,..] embedded in some of the columns
+    
+    fname_lead_mesh_lut     = fullfile(locDirs.roi, 'lead_mesh_LUT_monopolar.mat');
+    fname_lead_mesh_lut_bp  = fullfile(locDirs.roi, 'lead_mesh_LUT_bipolar.mat');
+    
+    % These mats contain lead_mesh_lut, which is a struct with the following fields:
+    %       chanName
+    %       whichHemi
+    %       nearest_mesh_ind
+    %       geodisc_mesh_ind
+    %       geodisc_dist
+    
+    
+    lead_roi_lut = [];
+    lead_roi_lut_bp = [];
+       
+    
+    
+    % for hemisphere = hems
+    for hemisphere = 'lr'
+        
+        fname_roi_mesh_lut = fullfile(locDirs.roi, sprintf('ROIC_mesh_LUT_%sh.csv', hemisphere));
+        
+        
+        % This table contains a VERY LARGE lookup table used to map ROICs to their region with columns:
+        % 
+        % note for Mike: the table is ROIC --> mesh. We actually only need electrode --> ROIC --> mesh
+        %                ie it can just use union(ROIC_verts) as a starting set
+        
+        if RERUN_ROI || ...
+                ~exist(fname_roi_mesh_lut, 'file') || ~exist(fname_lead_roi_lut, 'file') || ~exist(fname_lead_roi_lut_bp, 'file') || ...
+                ~exist(fname_lead_mesh_lut, 'file') || ~exist(fname_lead_mesh_lut_bp, 'file')
+            
+            fname_default_ROIC  = fullfile(TOOLBOX, sprintf('visualize/data/zLocalize_ROI_centers_%sh.mat', hemisphere));
+            dural_filename      = fullfile(locDirs.fs_subj,'SUMA',[hemisphere 'h.pial-outer-smoothed.gii']);
+            pial_filename       = fullfile(locDirs.fs_subj,'SUMA',['std.141.' hemisphere 'h.pial.gii']);
+            % assert(exist(dural_filename, 'file') > 0, 'File not found: %s\n', dural_filename);
+            % JD: we're not using the dura, so I don't think we need the
+            % above. 
+            
+            assert(exist(pial_filename, 'file') > 0, 'File not found: %s\n', pial_filename);
+
+            dural_surf          = []; 
+            pial_surf           = gifti(pial_filename);
+            % hem_subdurals       = getLeads(subj, rootEEGdir, 'whichHemi',[hemisphere 'h'], 'hardwareType',{'subdural','micro-subdural'}, 'jacktable',jacktable);
+            % Quick edit for Price's stuff
+            
+            isLeft = sign(leads.x) == -1; 
+
+            if hemisphere == 'l'; thisHemisphere = isLeft; 
+            else; thisHemisphere = ~isLeft; 
+            end
+
+            hem_subdurals = leads.chanName(thisHemisphere);            
+            hem_coords          = leads(ismember(leads.chanName, hem_subdurals), :);
+            
+            % biploar
+            hem_coords_bp       = [];
+            fname_coords_bp = fullfile(locDirs.mr_pre, 'coords_mid_euclid.csv');
+            if exist(fname_coords_bp, 'file')
+                t = readtable(fname_coords_bp);
+                hem_coords_bp   = t(cellfun(@(s) upper(s(1))==upper(hemisphere), t.whichHemi), :);
+            end
+            
+            assert(exist(fname_default_ROIC,'file'),'Please make sure DiamondToolbox is the current working directory.')
+            try
+                temp        = load(fname_default_ROIC);
+                std_ROICs   = temp.vert_idx(1:N_ROIC);
+                clear('temp');
+            catch e
+                fprintf('Error: could not load ROICs: %s\n', e.message);
+            end
+            
+            if ~isempty(hem_subdurals)
+
+                % ROIC standard file (There is 1 global standard per hemisphere; ie subject-independent)
+            
+                
+                
+                fprintf('Calculating Leads->Surface %sh...\n', hemisphere)
+                lead_mesh_lut         = lead_to_mesh_grow(pial_surf, R_CONTACT, R_ROI_MAX_DIST, hem_coords, [hemisphere 'h'], fname_lead_mesh_lut);
+                if ~isempty(hem_coords_bp)
+                    lead_mesh_lut_bp  = lead_to_mesh_grow(pial_surf, R_CONTACT, R_ROI_MAX_DIST, hem_coords_bp, [hemisphere 'h'], fname_lead_mesh_lut_bp);
+                end
+            end
+            % % Get all Vertices within r distance of any mono/bipolar channel which are *also* ROICs
+            % temp = [lead_mesh_lut; lead_mesh_lut_bp];
+            % temp = unique(cell2mat(temp.geodisc_mesh_ind));
+            
+            %%%%%%%%%%%%
+            % JD Edits 
+            relevant_ROICs = std_ROICs;
+            % relevant_ROICs = intersect(std_ROICs, temp);
+            %  We need to keep all, not just 'relevant' 
+            %%%%%%%%%%%%
+            clear('temp');
+            
+            %% Below, the important LUTs will get overwritten. 
+            
+            % ROIC --> ROI growth
+            fprintf('Calculating ROIC->ROIs %sh...\n', hemisphere);
+            % create ROIC_mesh_LUT_%sh.csv / braindata.roi.roic_roi_%sh / fname_roi_mesh_lut:
+            roi_mesh_d_lut_hem = grow_ROIs(pial_surf, relevant_ROICs, R_ROI_MAX_DIST); 
+            
+            
+            if ~isempty(hem_subdurals)
+                lead_roi_lut    = [lead_roi_lut; lead_to_ROI(roi_mesh_d_lut_hem, hem_coords, pial_surf, dural_surf, R_ROI_MAX_DIST, locDirs.roi, lead_mesh_lut, 'contact_radius',R_CONTACT)];
+                if ~isempty(hem_coords_bp)
+                    lead_roi_lut_bp = [lead_roi_lut_bp; lead_to_ROI(roi_mesh_d_lut_hem, hem_coords_bp, pial_surf, dural_surf, R_ROI_MAX_DIST, locDirs.roi, lead_mesh_lut_bp, 'contact_radius',R_CONTACT)];
+                end
+                save(fname_lead_roi_lut, 'lead_roi_lut');       % both hemispheres in one
+                
+                if ~isempty(lead_roi_lut_bp)
+                    save(fname_lead_roi_lut_bp, 'lead_roi_lut_bp');
+                end
+                
+            end
+            
+            writetable(roi_mesh_d_lut_hem, fname_roi_mesh_lut); % per hemisphere
+        else
+            load(fname_lead_roi_lut);
+        end 
+        
+       
+    end
+end
