@@ -15,7 +15,8 @@ classdef sourceLocalizer
             'maxNegPeakWidth',0.05,... seconds
             'peakWin', 0.1, ... % seconds
             'ampScale',3,... z 
-            'trackPeaks',false)); 
+            'trackPeaks',false,...
+            'zThresh',3)); 
 
         seqResults = struct('seriesAll',[],'timesAll',[]);
         sensors
@@ -113,6 +114,9 @@ classdef sourceLocalizer
 
             %%
 
+            assert(exist('braindata2', 'file') == 2, 'braindata2 not found on path. Please check paths. Navigate to diamondToolbox and use addpath(genpath(pwd)).');
+            assert(exist('brainplotter', 'file') == 2, 'brainplotter not found on path. Please check paths. Navigate to diamondToolbox and use addpath(genpath(pwd)).');
+
             subjDir = fullfile(self.subjFolder,'braindata');
 
             fName = fullfile(subjDir,'bdBpFull.mat');
@@ -155,7 +159,7 @@ classdef sourceLocalizer
             parse(p,varargin{:})
             forceNew = p.Results.forceNew;
 
-            if ~isempty(self.spikeDetectionResults) && ~forceNew; return; end
+            if ~isempty(self.spikeDetectionResults.rasters) && ~forceNew; return; end
 
             %%
 
@@ -206,9 +210,12 @@ classdef sourceLocalizer
             maxPosPeakWidth = Inf; 
             trackPeaks = self.spikeDetectionResults.paramStruct.trackPeaks;
             ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
-            peakSeparation = self.spikeDetectionResults.paramStruct.peakSeparation; 
+            peakSeparation = 0; 
             maxPeakHeight = Inf; 
             ctsThresh = 0; 
+            zThresh = self.spikeDetectionResults.paramStruct.zThresh;
+            peakWin = self.spikeDetectionResults.paramStruct.peakWin;
+
             % If you choose to mess around with ctsThresh or other 
             % 'non-reported' parameters, feel free to pass them back with
             % self.spikeDetectionResults.paramStruct.
@@ -515,7 +522,7 @@ classdef sourceLocalizer
             % For sequences that became too short after accounting for duplicate
             % electrodes
 
-            [seriesAll,timesAll] = removeDuplicates(seriesAll,timesAll);
+            [seriesAll,timesAll] = self.removeDuplicates(seriesAll,timesAll);
             % For duplicate SEQUENCES, big difference
 
             self.seqResults.seriesAll = seriesAll;
@@ -1219,7 +1226,7 @@ classdef sourceLocalizer
                 end
                 maxColor = max(maxColor,currentMax);
             end
-            fprintf('Max color is %.f. \n',maxColor);
+            % fprintf('Max color is %.f. \n',maxColor);
 
             clim = [0 maxColor];
 
@@ -1424,10 +1431,8 @@ classdef sourceLocalizer
 
         end
 
-        function sourceLoc = removeVolCond_fromRaster(sourceLoc)
+        function [rasters,waveforms] = removeVolCond_fromRaster(rasters,waveforms)
 
-            rasters = sourceLoc.rasters;
-            waveforms = sourceLoc.waveforms;
             listLocs = cell(1,size(rasters,2));
 
             if sum(rasters(:)) == 0; return; end
@@ -1447,9 +1452,6 @@ classdef sourceLocalizer
                 rasters(listLocs{ii}(isBad),ii) = false;
                 waveforms{ii}(isBad,:) = [];
             end
-
-            sourceLoc.rasters = rasters;
-            sourceLoc.waveforms = waveforms;
 
         end
 
