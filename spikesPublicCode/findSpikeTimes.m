@@ -1,12 +1,12 @@
-function sourceLoc = findSpikeTimes(inputData,peak_win, z_thresh, cts_thresh,varargin)
+function sourceLoc = findSpikeTimes(inputData,peakWin, zThresh, ctsThresh,varargin)
 
 
 %% parse inputs
 p = inputParser;
 
 % specific to this code
-def_amp_scale = 3;
-addParameter(p,'amp_scale',def_amp_scale,@(x) isscalar(x));
+defAmpScale = 3;
+addParameter(p,'amp_scale',defAmpScale,@(x) isscalar(x));
 
 % For passing in time series. 
 addParameter(p,'maxNegPeakWidth',50); 
@@ -16,7 +16,7 @@ addParameter(p,'trackPeaks',false);
 addParameter(p,'maxPeakHeight',Inf); 
 
 parse(p,varargin{:})
-amp_scale=p.Results.amp_scale;
+ampScale = p.Results.ampScale;
 
 maxNegPeakWidth = p.Results.maxNegPeakWidth;
 maxPosPeakWidth = p.Results.maxPosPeakWidth;
@@ -26,10 +26,10 @@ maxPeakHeight = p.Results.maxPeakHeight;
 
 if trackPeaks
     posPeakSeparation = peakSeparation; negPeakSeparation = 0; 
-    posPeakHeight = z_thresh; negPeakHeight = 0; 
+    posPeakHeight = zThresh; negPeakHeight = 0; 
 else 
     negPeakSeparation = peakSeparation; posPeakSeparation = 0; 
-    posPeakHeight = 0; negPeakHeight = z_thresh; 
+    posPeakHeight = 0; negPeakHeight = zThresh; 
 end
 
 %% load data and set up parameters/arrays
@@ -41,7 +41,7 @@ timeSeries = inputData.timeSeries;
 
 dims=size(timeSeries);
 
-hp=floor(peak_win*Fs); % window around peak
+peakWinSamples = floor(peakWin*Fs); % window around peak; samples 
 
 %% find peaks based on polarity
 warning('off','signal:findpeaks:largeMinPeakHeight');
@@ -57,13 +57,13 @@ parfor(kk=1:length(chanNames))
     %% Peaks and troughs 
     
     xCurrent = timeSeries(:,kk);
-    [pHeight,pInd]=findpeaks(xCurrent,'MinPeakprominence',z_thresh,'MinPeakHeight',posPeakHeight,'MaxPeakWidth',maxPosPeakWidth,'minPeakDistance',posPeakSeparation);
+    [pHeight,pInd]=findpeaks(xCurrent,'MinPeakprominence',zThresh,'MinPeakHeight',posPeakHeight,'MaxPeakWidth',maxPosPeakWidth,'minPeakDistance',posPeakSeparation);
 
     isBad = pHeight > maxPeakHeight; 
     pHeight(isBad) = []; 
     pInd(isBad) = []; 
     
-    [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakProminence',z_thresh,'MinPeakHeight',negPeakHeight,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
+    [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakProminence',zThresh,'MinPeakHeight',negPeakHeight,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
     
     isBad = false(size(nHeight));
     nHeight(isBad) = [];
@@ -87,13 +87,13 @@ parfor(kk=1:length(chanNames))
         
         % inds = matchingMatrix >= -hp & matchingMatrix < 0;
         % The above -- for up-deflection to come before down-deflection.
-        inds = matchingMatrix >= -hp & matchingMatrix <= hp;
+        inds = matchingMatrix >= -peakWinSamples & matchingMatrix <= peakWinSamples;
         
         [pFind,nFind] = find(inds);
         
         heightMatrix = false(size(pFind));
         for jj = 1:length(pFind)
-            heightMatrix(jj) = pHeight(pFind(jj)) + Nh2Buffer(nFind(jj),ii) >= amp_scale * z_thresh;
+            heightMatrix(jj) = pHeight(pFind(jj)) + Nh2Buffer(nFind(jj),ii) >= ampScale * zThresh;
         end
         
         nFind = nFind(heightMatrix); 
@@ -102,14 +102,14 @@ parfor(kk=1:length(chanNames))
         % Waveform
         if trackPeaks
             for jj = 1:length(pFind)
-                ts = nan(1,2 * hp + 1);
+                ts = nan(1,2 * peakWinSamples + 1);
                 % tsBb = ts; 
                 
-                startInd = max(pInd(pFind(jj)) - hp,1);
-                startBuffer = max(-(pInd(pFind(jj)) - hp) + 2,1);
+                startInd = max(pInd(pFind(jj)) - peakWinSamples,1);
+                startBuffer = max(-(pInd(pFind(jj)) - peakWinSamples) + 2,1);
                 
-                endInd = min(pInd(pFind(jj)) + hp,dims(1));
-                endBuffer = min(hp-(pInd(pFind(jj))-dims(1)) + 1,2 * hp + 1);
+                endInd = min(pInd(pFind(jj)) + peakWinSamples,dims(1));
+                endBuffer = min(peakWinSamples-(pInd(pFind(jj))-dims(1)) + 1,2 * peakWinSamples + 1);
                 % ts = xCurrent(pInd(pFind(jj))- hp:pInd(pFind(jj)) + hp);
                 ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
                 waveforms{pInd(pFind(jj))} = ts;
@@ -117,17 +117,17 @@ parfor(kk=1:length(chanNames))
         else
             for jj = 1:length(nFind)
                 
-                ts = nan(1,2 * hp + 1);
+                ts = nan(1,2 * peakWinSamples + 1);
                 % I'll start by filling this with NaNs, for the rare event that
                 % we have spikes at the very beginning of the time series.
                 % tsBb = ts; 
                 
                 
-                startInd = max(nIndBuffer(nFind(jj),ii) - hp,1);
-                startBuffer = max(-(nIndBuffer(nFind(jj),ii) - hp) + 2,1);
+                startInd = max(nIndBuffer(nFind(jj),ii) - peakWinSamples,1);
+                startBuffer = max(-(nIndBuffer(nFind(jj),ii) - peakWinSamples) + 2,1);
                 
-                endInd = min(nIndBuffer(nFind(jj),ii) + hp,dims(1));
-                endBuffer = min(hp-(nIndBuffer(nFind(jj),ii)-dims(1)) + 1,2 * hp + 1);
+                endInd = min(nIndBuffer(nFind(jj),ii) + peakWinSamples,dims(1));
+                endBuffer = min(peakWinSamples-(nIndBuffer(nFind(jj),ii)-dims(1)) + 1,2 * peakWinSamples + 1);
                 % ts = xCurrent(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp);
                 ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
                 
@@ -157,7 +157,7 @@ end
 
 %% Narrow by counts 
 
-badCounts = sum(fullRaster) < cts_thresh; 
+badCounts = sum(fullRaster) < ctsThresh; 
 fullRaster(:,badCounts) = false; 
 
 %% Pack up 

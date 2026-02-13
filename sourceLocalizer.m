@@ -9,16 +9,22 @@ classdef sourceLocalizer
 
         braindata = struct('myBd',[],'myBp',[]);
 
-        spikeDetectionResults % Spike timings
+        spikeDetectionResults = struct('rasters',[],'waveforms',[],...
+            'paramStruct',struct(...
+            'seqWin',0.1,... seconds
+            'maxNegPeakWidth',0.05,... seconds
+            'peakWin', 0.1, ... % seconds
+            'ampScale',3,... z 
+            'trackPeaks',false)); 
+
         seqResults = struct('seriesAll',[],'timesAll',[]);
         sensors
-        sourceLocalizationResults = struct('localizationResults',[],'roiResults',[])
 
-        localizationParams = struct(...
-            'propagationSpeed',300,...
-            'sensorDistance',30,...
-            'subsensorLength',3,...
-            'seqWin',0.1);
+        sourceLocalizationResults = struct('localizationResults',[],'roiResults',[],...
+            'paramStruct', struct(...
+            'propagationSpeed',300,... % mm / s
+            'sensorDistance',30,... mm 
+            'subsensorLength',3)); 
 
 
         % These are defaults and can be adjusted.
@@ -151,65 +157,204 @@ classdef sourceLocalizer
 
             if ~isempty(self.spikeDetectionResults) && ~forceNew; return; end
 
-
-            % Let's mandate one spike per 30 minutes.
-            ctsThresh = 0;
-
-            inputStruct.Fs = self.Fs;
-            inputStruct.timeSeries = self.timeSeries;
-            inputStruct.chanNames = self.chanNames;
-
-
             %%
 
-            peakWin = 0.1;
-            zThresh = 3;
-            ampScale = 3;
-            maxNegPeakWidth = 50; % ms
-            maxNegPeakWidth = maxNegPeakWidth / 1000 * self.Fs; % Samples
-            trackPeaks = false;
+            fprintf('Calling spike detector with the following parameters. These are adjustable.\n'); 
+            disp(self.spikeDetectionResults.paramStruct); 
 
-            spikeDetectionOutput = ...
-                findSpikeTimes(inputStruct,peakWin,zThresh,ctsThresh, ...
-                'amp_scale',ampScale,'maxNegPeakWidth',maxNegPeakWidth, ...
-                'trackPeaks',trackPeaks);
+            % peakWin = 0.1;
+            % zThresh = 3;
+            % ampScale = 3;
+            % maxNegPeakWidth = 50; % ms
+            % maxNegPeakWidth = maxNegPeakWidth / 1000 * self.Fs; % Samples
+            % trackPeaks = false;
 
-            spikeDetectionOutput = removeVolCond_fromRaster(spikeDetectionOutput);
-
-            %% Retrieve Series
-
-            % seqWin = 0.1;
-            % I never really gave the above much thought.
-            % But 0.1 is a pretty good number here.
-            % We wouldn't really be expecting to localize spikes with sensors greater
-            % than 0.3 cm apart, because we wouldn't expect signal to necessarily
-            % travel that far anyway.
-            % So given a sensor spacing of 3 cm, the maximal interval of time receipt
-            % is distance (mm) / propagationSpeed (mm/s)
-            % = 30 / 300 mm / mm * s
-            % = 0.1 s.
+            self = self.findSpikeTimes;
 
 
-            self.spikeDetectionResults.rasters = spikeDetectionOutput.rasters;
-            self.spikeDetectionResults.waveforms = spikeDetectionOutput.waveforms;
+        end
+
+        function self = findSpikeTimes(self)
 
 
-            % sourceLoc = computeSequences(sourceLoc,seqWin);
-            % Skip for now, do it in parent function
+            %% parse inputs
+            % p = inputParser;
+
+            % specific to this code
+            % defAmpScale = 3;
+            % addParameter(p,'ampScale',defAmpScale,@(x) isscalar(x));
+
+            % For passing in time series.
+            % addParameter(p,'maxNegPeakWidth',50);
+            % addParameter(p,'maxPosPeakWidth',Inf);
+            % addParameter(p,'peakSeparation',0);
+            % addParameter(p,'trackPeaks',false);
+            % addParameter(p,'maxPeakHeight',Inf);
+            % 
+            % parse(p,varargin{:})
+            % ampScale = p.Results.ampScale;
+            % 
+            % maxNegPeakWidth = p.Results.maxNegPeakWidth;
+            % maxPosPeakWidth = p.Results.maxPosPeakWidth;
+            % trackPeaks = p.Results.trackPeaks;
+            % peakSeparation = p.Results.peakSeparation;
+            % maxPeakHeight = p.Results.maxPeakHeight;
+
+            % Kill the input parser 
+
+            maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth; 
+            maxPosPeakWidth = Inf; 
+            trackPeaks = self.spikeDetectionResults.paramStruct.trackPeaks;
+            ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
+            peakSeparation = self.spikeDetectionResults.paramStruct.peakSeparation; 
+            maxPeakHeight = Inf; 
+            ctsThresh = 0; 
+            % If you choose to mess around with ctsThresh or other 
+            % 'non-reported' parameters, feel free to pass them back with
+            % self.spikeDetectionResults.paramStruct.
+
+            if trackPeaks
+                posPeakSeparation = peakSeparation; negPeakSeparation = 0;
+                posPeakHeight = zThresh; negPeakHeight = 0;
+            else
+                negPeakSeparation = peakSeparation; posPeakSeparation = 0;
+                posPeakHeight = 0; negPeakHeight = zThresh;
+            end
+
+            %% load data and set up parameters/arrays
+
+            thisTs = self.timeSeries; 
+            tsDims = size(thisTs);
+
+            peakWinSamples = floor(peakWin*self.Fs); % window around peak; samples
+            maxNegPeakWidth = maxNegPeakWidth * self.Fs; % Samples 
+
+            %% find peaks based on polarity
+
+            warning('off','signal:findpeaks:largeMinPeakHeight');
+
+            fullRaster = sparse(tsDims(1),tsDims(2));
+            waveformsMaster = cell(1,tsDims(2));
+
+            parfor(kk=1:length(self.chanNames))
+
+                currentRaster = sparse(tsDims(1),1);
+                waveforms = cell(size(currentRaster));
+
+                %% Peaks and troughs
+
+                xCurrent = thisTs(:,kk);
+                [pHeight,pInd]=findpeaks(xCurrent,'MinPeakprominence',zThresh,'MinPeakHeight',posPeakHeight,'MaxPeakWidth',maxPosPeakWidth,'minPeakDistance',posPeakSeparation);
+
+                isBad = pHeight > maxPeakHeight;
+                pHeight(isBad) = [];
+                pInd(isBad) = [];
+
+                [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakProminence',zThresh,'MinPeakHeight',negPeakHeight,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
+
+                isBad = false(size(nHeight));
+                nHeight(isBad) = [];
+                nInd(isBad) = [];
+
+
+                %% Matching
+
+                maxNumel = 1000000;
+                bufferSize = min(100, ceil(maxNumel / length(pInd)));
+
+                nIndBuffer = buffer(nInd,bufferSize);
+                Nh2Buffer = buffer(nHeight,bufferSize);
+
+                Nh2Buffer(nIndBuffer == 0) = NaN;
+                nIndBuffer(nIndBuffer == 0) = NaN;
+
+                for ii = 1:size(nIndBuffer,2)
+
+                    matchingMatrix = pInd - nIndBuffer(:,ii)';
+
+                    % inds = matchingMatrix >= -hp & matchingMatrix < 0;
+                    % The above -- for up-deflection to come before down-deflection.
+                    inds = matchingMatrix >= -peakWinSamples & matchingMatrix <= peakWinSamples;
+
+                    [pFind,nFind] = find(inds);
+
+                    heightMatrix = false(size(pFind));
+                    for jj = 1:length(pFind)
+                        heightMatrix(jj) = pHeight(pFind(jj)) + Nh2Buffer(nFind(jj),ii) >= ampScale * zThresh;
+                    end
+
+                    nFind = nFind(heightMatrix);
+                    pFind = pFind(heightMatrix);
+
+                    % Waveform
+                    if trackPeaks
+                        for jj = 1:length(pFind)
+                            ts = nan(1,2 * peakWinSamples + 1);
+                            % tsBb = ts;
+
+                            startInd = max(pInd(pFind(jj)) - peakWinSamples,1);
+                            startBuffer = max(-(pInd(pFind(jj)) - peakWinSamples) + 2,1);
+
+                            endInd = min(pInd(pFind(jj)) + peakWinSamples,tsDims(1));
+                            endBuffer = min(peakWinSamples-(pInd(pFind(jj))-tsDims(1)) + 1,2 * peakWinSamples + 1);
+                            % ts = xCurrent(pInd(pFind(jj))- hp:pInd(pFind(jj)) + hp);
+                            ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
+                            waveforms{pInd(pFind(jj))} = ts;
+                        end
+                    else
+                        for jj = 1:length(nFind)
+
+                            ts = nan(1,2 * peakWinSamples + 1);
+                            % I'll start by filling this with NaNs, for the rare event that
+                            % we have spikes at the very beginning of the time series.
+                            % tsBb = ts;
+
+
+                            startInd = max(nIndBuffer(nFind(jj),ii) - peakWinSamples,1);
+                            startBuffer = max(-(nIndBuffer(nFind(jj),ii) - peakWinSamples) + 2,1);
+
+                            endInd = min(nIndBuffer(nFind(jj),ii) + peakWinSamples,tsDims(1));
+                            endBuffer = min(peakWinSamples-(nIndBuffer(nFind(jj),ii)-tsDims(1)) + 1,2 * peakWinSamples + 1);
+                            % ts = xCurrent(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp);
+                            ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
+
+                            %             clf; plot(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp,ts); hold on
+                            %             plot(nIndBuffer(nFind(jj),ii),xCurrent(nIndBuffer(nFind(jj),ii)),'ro')
+                            %             plot(pInd(pFind(jj)),xCurrent(pInd(pFind(jj))),'bo');
+                            % pause
+
+                            waveforms{nIndBuffer(nFind(jj),ii)} = ts;
+
+                        end
+                    end
+
+                    if trackPeaks; currentRaster(pInd(pFind)) = true; % To retain peaks
+                    else; currentRaster(nIndBuffer(nFind,ii)) = true;
+                    end
+
+                end
+                waveforms(~currentRaster) = [];
+                waveforms = cell2mat(waveforms);
+                waveformsMaster{kk} = waveforms;
+
+                fullRaster(:,kk) = currentRaster;
+
+
+            end
+
+            %% Narrow by counts
+
+            badCounts = sum(fullRaster) < ctsThresh;
+            fullRaster(:,badCounts) = false;
+
+            %% Volume conduction 
+
+            [fullRaster,waveformsMaster] = self.removeVolCond_fromRaster(fullRaster,waveformsMaster);
 
             %% Pack up
 
-            paramStruct = struct;
-            paramStruct.peakWin = peakWin;
-            paramStruct.zThresh = zThresh; paramStruct.ctsThresh = ctsThresh;
-            paramStruct.amp_scale = ampScale;
-            paramStruct.Fs = inputStruct.Fs;
-            paramStruct.maxNegPeakWidth = maxNegPeakWidth;
-            paramStruct.trackPeaks = trackPeaks;
-
-            self.spikeDetectionResults.paramStruct = paramStruct;
-
-            self.spikeDetectionResults = self.spikeDetectionResults;
+            self.spikeDetectionResults.rasters = fullRaster;
+            self.spikeDetectionResults.waveforms = waveformsMaster;
 
 
         end
@@ -229,7 +374,19 @@ classdef sourceLocalizer
 
             if ~forceNew && ~isempty(self.seqResults.seriesAll); return; end
 
-            seqWinSamples = ceil(self.localizationParams.seqWin * self.Fs);  % Samples
+            % seqWin = 0.1;
+            % I never really gave the above much thought.
+            % But 0.1 is a pretty good number here.
+            % We wouldn't really be expecting to localize spikes with sensors greater
+            % than 0.3 cm apart, because we wouldn't expect signal to necessarily
+            % travel that far anyway.
+            % So given a sensor spacing of 3 cm, the maximal interval of time receipt
+            % is distance (mm) / propagationSpeed (mm/s)
+            % = 30 / 300 mm / mm * s
+            % = 0.1 s.
+
+
+            seqWinSamples = ceil(self.spikeDetectionResults.paramStruct.seqWin * self.Fs);  % Samples
             overlapSamples = floor(seqWinSamples / 2);
 
             rasters = self.spikeDetectionResults.rasters;
@@ -367,7 +524,13 @@ classdef sourceLocalizer
         end
 
 
-        function self = localizationManagerSpikes(self)
+        function self = localizationManagerSpikes(self,varargin)
+
+            p = inputParser;
+            addParameter(p,'plotting',true);
+            parse(p,varargin{:})
+            plotting = p.Results.plotting;
+
 
             %% Preamble
 
@@ -403,9 +566,9 @@ classdef sourceLocalizer
 
             self = self.locDataToRoi;
 
-
             %% Plot
 
+            if ~plotting; return; end
             self.plotSurfFun;
 
         end
@@ -413,7 +576,7 @@ classdef sourceLocalizer
         function self = getSensors(self)
 
             self = self.loadGeodesic;
-            sensorDistance = self.localizationParams.sensorDistance;
+            sensorDistance = self.sourceLocalizationResults.paramStruct.sensorDistance;
 
             geodesicDistancesMaster = self.geodesic.geodesicDistances;
             vertexNums = self.geodesic.vertexNums;
@@ -655,7 +818,7 @@ classdef sourceLocalizer
 
             %% Preamble
 
-            intervalMax = self.localizationParams.sensorDistance / self.localizationParams.propagationSpeed; % Seconds
+            intervalMax = self.sourceLocalizationResults.paramStruct.sensorDistance / self.sourceLocalizationResults.paramStruct.propagationSpeed; % Seconds
             intervalMax = intervalMax * self.Fs;
 
             % subsensorLength = 3;
@@ -688,7 +851,7 @@ classdef sourceLocalizer
                 currentSeries = currentSeries(~isnan(currentTimes));
                 currentTimes = currentTimes(~isnan(currentTimes));
 
-                if length(currentTimes) < self.localizationParams.subsensorLength; continue; end
+                if length(currentTimes) < self.sourceLocalizationResults.paramStruct.subsensorLength; continue; end
 
                 currentTimes(1) = 0;
                 for ii = 2:length(currentTimes)
@@ -702,7 +865,7 @@ classdef sourceLocalizer
                 leadPairs = leadIndices(pairIndices);
 
                 [a,b] = ismember(leadPairs,sensorFlip,'rows');
-                if sum(a) < self.localizationParams.subsensorLength; continue; end
+                if sum(a) < self.sourceLocalizationResults.paramStruct.subsensorLength; continue; end
 
                 pairIndices(b > size(sensorInds,1),:) = fliplr(pairIndices(b > size(sensorInds,1),:));
                 pairIndices = pairIndices(a,:);
@@ -719,7 +882,7 @@ classdef sourceLocalizer
                 pairTimes = currentTimes(pairIndices);
                 diffTimes = -diff(pairTimes,1,2);
                 belowInterval = abs(diffTimes) <= intervalMax;
-                if sum(belowInterval) < self.localizationParams.subsensorLength; continue; end
+                if sum(belowInterval) < self.sourceLocalizationResults.paramStruct.subsensorLength; continue; end
                 % It will be very unusual to get here, since the <100 ms requirement is
                 % enforced by the sequence collection scheme.
                 % Unless of course we're using a different propagation speed or
@@ -779,7 +942,7 @@ classdef sourceLocalizer
             dPosition = self.sensors.seriesTable;
 
             dPosition = dPosition / self.Fs; % Seconds
-            dPosition = dPosition * self.localizationParams.propagationSpeed; % mm
+            dPosition = dPosition * self.sourceLocalizationResults.paramStruct.propagationSpeed; % mm
 
             lengthData = size(dPosition,2);
             sensorInds = self.sensors.sensorInds;
@@ -834,7 +997,7 @@ classdef sourceLocalizer
 
             localizationResults = nan(3,lengthData);
 
-            subsensorLength = self.localizationParams.subsensorLength;
+            subsensorLength = self.sourceLocalizationResults.paramStruct.subsensorLength;
             perceivedActualCutoff = 0.9;
 
             parfor jj = 1:lengthData
@@ -959,11 +1122,11 @@ classdef sourceLocalizer
 
             self.sourceLocalizationResults.localizationResults = localizationResults;
 
-            self.localizationParams.marginError = marginError;
-            self.localizationParams.distanceThresh = distanceThresh;
-            self.localizationParams.perceivedActualCutoff = perceivedActualCutoff;
+            self.sourceLocalizationResults.paramStruct.marginError = marginError;
+            self.sourceLocalizationResults.paramStruct.distanceThresh = distanceThresh;
+            self.sourceLocalizationResults.paramStruct.perceivedActualCutoff = perceivedActualCutoff;
 
-            self.localizationParams.qualityControlThresh = qualityControlThresh;
+            self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
 
 
         end
@@ -1261,7 +1424,37 @@ classdef sourceLocalizer
 
         end
 
-    end
+        function sourceLoc = removeVolCond_fromRaster(sourceLoc)
 
+            rasters = sourceLoc.rasters;
+            waveforms = sourceLoc.waveforms;
+            listLocs = cell(1,size(rasters,2));
+
+            if sum(rasters(:)) == 0; return; end
+
+
+            volCondInds = find(sum(rasters,2) >= 2);
+            if isempty(volCondInds); return; end
+            fprintf('%.2f%% of single spike samples contained duplicate spikes and were removed on account of possible volume conduction.\n',full(length(volCondInds) / sum(any(rasters,2)) * 100));
+            % markForDeletion = cell(1,size(rasters,2));
+
+            for ii = 1:length(listLocs)
+                listLocs{ii} = find(rasters(:,ii));
+            end
+
+            for ii = 1:length(listLocs)
+                isBad = ismember(listLocs{ii},volCondInds);
+                rasters(listLocs{ii}(isBad),ii) = false;
+                waveforms{ii}(isBad,:) = [];
+            end
+
+            sourceLoc.rasters = rasters;
+            sourceLoc.waveforms = waveforms;
+
+        end
+
+
+
+    end
 
 end

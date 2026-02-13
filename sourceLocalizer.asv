@@ -7,18 +7,24 @@ classdef sourceLocalizer
         chanNames
         Fs
 
-        braindata = struct('myBd',[],'myBp',[]); 
+        braindata = struct('myBd',[],'myBp',[]);
 
-        spikeDetectionResults % Spike timings
+        spikeDetectionResults = struct('rasters',[],'waveforms',[],...
+            'paramStruct',struct(...
+            'seqWin',0.1,... seconds
+            'maxNegPeakWidth',0.05,... seconds
+            'peakWin', 0.1, ... % seconds
+            'ampScale',3,... z 
+            'trackPeaks',false)); 
+
         seqResults = struct('seriesAll',[],'timesAll',[]);
         sensors
-        sourceLocalizationResults = struct('localizationResults',[],'roiResults',[])
 
-        localizationParams = struct(...
-            'propagationSpeed',300,...
-            'sensorDistance',30,...
-            'subsensorLength',3,...
-            'seqWin',0.1);
+        sourceLocalizationResults = struct('localizationResults',[],'roiResults',[],...
+            'paramStruct', struct(...
+            'propagationSpeed',300,... % mm / s
+            'sensorDistance',30,... mm 
+            'subsensorLength',3)); 
 
 
         % These are defaults and can be adjusted.
@@ -66,7 +72,7 @@ classdef sourceLocalizer
             %   timeSeries    – n x m array (n samples, m channels)
             %   chanNames     – m x 1 cell array of channel name strings
             %   Fs            – sampling rate (Hz)
-            % 
+            %
             % Note:
             %   You can build a wrapper that takes a subject name, loads the
             %   relevant timeSeries, chanNames, and Fs, and passes them to spikesMain.
@@ -103,7 +109,7 @@ classdef sourceLocalizer
             forceNew = p.Results.forceNew;
             saving = p.Results.saving;
 
-            if ~forceNew && ~isempty(self.braindata.myBd); return; end 
+            if ~forceNew && ~isempty(self.braindata.myBd); return; end
 
             %%
 
@@ -162,16 +168,19 @@ classdef sourceLocalizer
 
             %%
 
-            peakWin = 0.1;
-            zThresh = 3;
-            ampScale = 3;
-            maxNegPeakWidth = 50; % ms
-            maxNegPeakWidth = maxNegPeakWidth / 1000 * self.Fs; % Samples
-            trackPeaks = false;
+            fprintf('Calling spike detector with the following parameters. These are adjustable.\n'); 
+            disp(self.spikeDetectionResults.paramStruct); 
+
+            % peakWin = 0.1;
+            % zThresh = 3;
+            % ampScale = 3;
+            % maxNegPeakWidth = 50; % ms
+            % maxNegPeakWidth = maxNegPeakWidth / 1000 * self.Fs; % Samples
+            % trackPeaks = false;
 
             spikeDetectionOutput = ...
                 findSpikeTimes(inputStruct,peakWin,zThresh,ctsThresh, ...
-                'amp_scale',ampScale,'maxNegPeakWidth',maxNegPeakWidth, ...
+                'ampScale',ampScale,'maxNegPeakWidth',maxNegPeakWidth, ...
                 'trackPeaks',trackPeaks);
 
             spikeDetectionOutput = removeVolCond_fromRaster(spikeDetectionOutput);
@@ -213,6 +222,189 @@ classdef sourceLocalizer
 
 
         end
+
+        function self = findSpikeTimes(self)
+
+
+            %% parse inputs
+            % p = inputParser;
+
+            % specific to this code
+            % defAmpScale = 3;
+            % addParameter(p,'ampScale',defAmpScale,@(x) isscalar(x));
+
+            % For passing in time series.
+            % addParameter(p,'maxNegPeakWidth',50);
+            % addParameter(p,'maxPosPeakWidth',Inf);
+            % addParameter(p,'peakSeparation',0);
+            % addParameter(p,'trackPeaks',false);
+            % addParameter(p,'maxPeakHeight',Inf);
+            % 
+            % parse(p,varargin{:})
+            % ampScale = p.Results.ampScale;
+            % 
+            % maxNegPeakWidth = p.Results.maxNegPeakWidth;
+            % maxPosPeakWidth = p.Results.maxPosPeakWidth;
+            % trackPeaks = p.Results.trackPeaks;
+            % peakSeparation = p.Results.peakSeparation;
+            % maxPeakHeight = p.Results.maxPeakHeight;
+
+            % Kill the input parser 
+
+            maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth; 
+            maxPosPeakWidth = Inf; 
+            trackPeaks = self.spikeDetectionResults.paramStruct.trackPeaks;
+            ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
+            peakSeparation = self.spikeDetectionResults.paramStruct.peakSeparation; 
+            maxPeakHeight = Inf; 
+
+            if trackPeaks
+                posPeakSeparation = peakSeparation; negPeakSeparation = 0;
+                posPeakHeight = zThresh; negPeakHeight = 0;
+            else
+                negPeakSeparation = peakSeparation; posPeakSeparation = 0;
+                posPeakHeight = 0; negPeakHeight = zThresh;
+            end
+
+            %% load data and set up parameters/arrays
+
+            if ~isstruct(inputData); error('Check input arguments. X_raw should be a struct now, with Fs field.'); end
+            Fs = inputData.Fs;
+            chanNames = inputData.chanNames;
+            timeSeries = inputData.timeSeries;
+
+            dims=size(timeSeries);
+
+            peakWinSamples = floor(peakWin*Fs); % window around peak; samples
+
+            %% find peaks based on polarity
+            warning('off','signal:findpeaks:largeMinPeakHeight');
+
+            fullRaster = sparse(dims(1),dims(2));
+            waveformsMaster = cell(1,dims(2));
+
+            parfor(kk=1:length(chanNames))
+
+                currentRaster = sparse(dims(1),1);
+                waveforms = cell(size(currentRaster));
+
+                %% Peaks and troughs
+
+                xCurrent = timeSeries(:,kk);
+                [pHeight,pInd]=findpeaks(xCurrent,'MinPeakprominence',zThresh,'MinPeakHeight',posPeakHeight,'MaxPeakWidth',maxPosPeakWidth,'minPeakDistance',posPeakSeparation);
+
+                isBad = pHeight > maxPeakHeight;
+                pHeight(isBad) = [];
+                pInd(isBad) = [];
+
+                [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakProminence',zThresh,'MinPeakHeight',negPeakHeight,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
+
+                isBad = false(size(nHeight));
+                nHeight(isBad) = [];
+                nInd(isBad) = [];
+
+
+                %% Matching
+
+                maxNumel = 1000000;
+                bufferSize = min(100, ceil(maxNumel / length(pInd)));
+
+                nIndBuffer = buffer(nInd,bufferSize);
+                Nh2Buffer = buffer(nHeight,bufferSize);
+
+                Nh2Buffer(nIndBuffer == 0) = NaN;
+                nIndBuffer(nIndBuffer == 0) = NaN;
+
+                for ii = 1:size(nIndBuffer,2)
+
+                    matchingMatrix = pInd - nIndBuffer(:,ii)';
+
+                    % inds = matchingMatrix >= -hp & matchingMatrix < 0;
+                    % The above -- for up-deflection to come before down-deflection.
+                    inds = matchingMatrix >= -peakWinSamples & matchingMatrix <= peakWinSamples;
+
+                    [pFind,nFind] = find(inds);
+
+                    heightMatrix = false(size(pFind));
+                    for jj = 1:length(pFind)
+                        heightMatrix(jj) = pHeight(pFind(jj)) + Nh2Buffer(nFind(jj),ii) >= ampScale * zThresh;
+                    end
+
+                    nFind = nFind(heightMatrix);
+                    pFind = pFind(heightMatrix);
+
+                    % Waveform
+                    if trackPeaks
+                        for jj = 1:length(pFind)
+                            ts = nan(1,2 * peakWinSamples + 1);
+                            % tsBb = ts;
+
+                            startInd = max(pInd(pFind(jj)) - peakWinSamples,1);
+                            startBuffer = max(-(pInd(pFind(jj)) - peakWinSamples) + 2,1);
+
+                            endInd = min(pInd(pFind(jj)) + peakWinSamples,dims(1));
+                            endBuffer = min(peakWinSamples-(pInd(pFind(jj))-dims(1)) + 1,2 * peakWinSamples + 1);
+                            % ts = xCurrent(pInd(pFind(jj))- hp:pInd(pFind(jj)) + hp);
+                            ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
+                            waveforms{pInd(pFind(jj))} = ts;
+                        end
+                    else
+                        for jj = 1:length(nFind)
+
+                            ts = nan(1,2 * peakWinSamples + 1);
+                            % I'll start by filling this with NaNs, for the rare event that
+                            % we have spikes at the very beginning of the time series.
+                            % tsBb = ts;
+
+
+                            startInd = max(nIndBuffer(nFind(jj),ii) - peakWinSamples,1);
+                            startBuffer = max(-(nIndBuffer(nFind(jj),ii) - peakWinSamples) + 2,1);
+
+                            endInd = min(nIndBuffer(nFind(jj),ii) + peakWinSamples,dims(1));
+                            endBuffer = min(peakWinSamples-(nIndBuffer(nFind(jj),ii)-dims(1)) + 1,2 * peakWinSamples + 1);
+                            % ts = xCurrent(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp);
+                            ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
+
+                            %             clf; plot(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp,ts); hold on
+                            %             plot(nIndBuffer(nFind(jj),ii),xCurrent(nIndBuffer(nFind(jj),ii)),'ro')
+                            %             plot(pInd(pFind(jj)),xCurrent(pInd(pFind(jj))),'bo');
+                            % pause
+
+                            waveforms{nIndBuffer(nFind(jj),ii)} = ts;
+
+                        end
+                    end
+
+                    if trackPeaks; currentRaster(pInd(pFind)) = true; % To retain peaks
+                    else; currentRaster(nIndBuffer(nFind,ii)) = true;
+                    end
+
+                end
+                waveforms(~currentRaster) = [];
+                waveforms = cell2mat(waveforms);
+                waveformsMaster{kk} = waveforms;
+
+                fullRaster(:,kk) = currentRaster;
+
+
+            end
+
+            %% Narrow by counts
+
+            badCounts = sum(fullRaster) < ctsThresh;
+            fullRaster(:,badCounts) = false;
+
+            %% Pack up
+
+            sourceLoc.rasters = fullRaster;
+            sourceLoc.waveforms = waveformsMaster;
+
+
+        end
+
+
+
+
 
         function self = computeSequences(self,varargin)
 
@@ -366,7 +558,14 @@ classdef sourceLocalizer
 
         end
 
-        function self = localizationManagerSpikes(self)
+
+        function self = localizationManagerSpikes(self,varargin)
+
+            p = inputParser;
+            addParameter(p,'plotting',true);
+            parse(p,varargin{:})
+            plotting = p.Results.plotting;
+
 
             %% Preamble
 
@@ -400,11 +599,11 @@ classdef sourceLocalizer
 
             self = self.localizationFunctionSpikes;
 
-            self = self.locDataToRoi; 
-
+            self = self.locDataToRoi;
 
             %% Plot
 
+            if ~plotting; return; end
             self.plotSurfFun;
 
         end
@@ -464,8 +663,8 @@ classdef sourceLocalizer
             %% Load or create, unpack
 
             if ~isempty(self.geodesic) && ~forceNew
-                assert(isequal(length(self.chanNames),length(self.geodesic.leadNames))); 
-                return; 
+                assert(isequal(length(self.chanNames),length(self.geodesic.leadNames)));
+                return;
             end
 
 
@@ -554,12 +753,12 @@ classdef sourceLocalizer
             addParameter(p,'forceNew',false);
             parse(p,varargin{:})
             saving = p.Results.saving;
-            forceNew = p.Results.forceNew; 
+            forceNew = p.Results.forceNew;
 
             fn = fullfile(self.subjFolder,sprintf('geodesic_%s.mat',self.subj));
 
             if ~forceNew && exist(fn,'file')
-                load(fn,'geodesicMaster'); 
+                load(fn,'geodesicMaster');
                 return
             end
 
@@ -769,9 +968,9 @@ classdef sourceLocalizer
 
             %% Preamble
 
-            if ~forceNew && ~isempty(self.sourceLocalizationResults.localizationResults); return; end 
+            if ~forceNew && ~isempty(self.sourceLocalizationResults.localizationResults); return; end
 
-            %% Onto the function 
+            %% Onto the function
 
             tic
 
@@ -962,7 +1161,7 @@ classdef sourceLocalizer
             self.localizationParams.distanceThresh = distanceThresh;
             self.localizationParams.perceivedActualCutoff = perceivedActualCutoff;
 
-            self.localizationParams.qualityControlThresh = qualityControlThresh; 
+            self.localizationParams.qualityControlThresh = qualityControlThresh;
 
 
         end
@@ -983,9 +1182,9 @@ classdef sourceLocalizer
             % For seizure source info
             %%%%
 
-            self = self.retrieveBraindata; 
+            self = self.retrieveBraindata;
             myBp = self.braindata.myBp;
-            myBd = self.braindata.myBd; 
+            myBd = self.braindata.myBd;
 
             isLeftInds = self.geodesic.isLeftInds;
             useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
@@ -997,6 +1196,7 @@ classdef sourceLocalizer
             %%%%%
 
             colormap(jet);
+            figure
             myBd.ezplot(myBp,gca); % If we would not like to include the resection territory
             % plotResectionSurf(myStruct) % If we would like to include the resection territory
             if useLeft; view(-90,currentEl);
@@ -1007,6 +1207,7 @@ classdef sourceLocalizer
 
             %%  Grab and set up ROI results
 
+            assert(~isempty(self.sourceLocalizationResults.localizationResults),'No data to plot.');
             self = self.locDataToRoi;
             roiResults = self.sourceLocalizationResults.roiResults;
             vMapAll = {roiResults.vertexMap};
@@ -1119,14 +1320,14 @@ classdef sourceLocalizer
             % timeWindow = p.Results.timeWindow;
 
             % timeWindow appears to be deprecated (in the spikes version).
-            % Maybe working in the seizure version? 
+            % Maybe working in the seizure version?
 
-            if ~forceNew && ~isempty(self.sourceLocalizationResults.roiResults); return; end 
+            if ~forceNew && ~isempty(self.sourceLocalizationResults.roiResults); return; end
 
-            self = self.localizationFunctionSpikes; % Needs to be done; no need to pass forceNew; 
+            self = self.localizationFunctionSpikes; % Needs to be done; no need to pass forceNew;
 
-            self = self.retrieveBraindata; 
-            myBd = self.braindata.myBd; 
+            self = self.retrieveBraindata;
+            myBd = self.braindata.myBd;
 
             roiRadius = Inf;
             sumEmpty = 0;
@@ -1136,7 +1337,7 @@ classdef sourceLocalizer
             currentLocs = self.sourceLocalizationResults.localizationResults;
             currentLocs(:,isnan(currentLocs(1,:))) = [];
 
-            assert(~isempty(currentLocs),'No localization.'); 
+            assert(~isempty(currentLocs),'No localization.');
 
 
             currentVertices = currentLocs(1,:);
@@ -1197,6 +1398,66 @@ classdef sourceLocalizer
         end
 
 
+
+    end
+
+    methods (Static = true)
+
+        function [spkLeads,spkTimes] = removeDuplicates(spkLeads,spkTimes)
+
+
+            seriesMap = containers.Map('keyType','char','valueType','any');
+            for jj = 1:size(spkTimes,2)
+
+                currentTimes = spkTimes(:,jj);
+                currentTimes(isnan(currentTimes)) = [];
+                for ii = 2:length(currentTimes)
+                    currentTimes(ii) = sum(currentTimes(ii - 1:ii));
+                end
+                currentLeads = spkLeads(:,jj);
+
+                % foundKey = false;
+                for ii = 1:length(currentTimes)
+                    currentKey = sprintf('%s_%d',currentLeads{ii},currentTimes(ii));
+
+                    if isKey(seriesMap,currentKey)
+                        seriesStruct = seriesMap(currentKey);
+                        % foundKey = true;
+                    else
+                        seriesStruct = struct;
+                        seriesStruct.indices = zeros(1,0);
+                        seriesStruct.length = zeros(1,0);
+                    end
+
+                    seriesStruct.indices(end + 1) = jj;
+                    seriesStruct.length(end + 1) = length(currentTimes);
+
+                    seriesMap(currentKey) = seriesStruct;
+                end
+
+            end
+            fullKeys = seriesMap.keys;
+
+            removeIndices = zeros(1,0);
+            for ii = 1:length(fullKeys)
+
+                seriesStruct = seriesMap(fullKeys{ii});
+                if isscalar(seriesStruct.indices); continue; end
+                [~,ind] = max(seriesStruct.length);
+
+                badIndices = seriesStruct.indices(1:length(seriesStruct.indices) ~= ind);
+                removeIndices = [removeIndices badIndices];
+
+            end
+            removeIndices = unique(removeIndices);
+            fprintf('%.2f%% of series removed as duplicates.\n',length(removeIndices) / size(spkLeads,2) * 100);
+            spkLeads(:,removeIndices) = [];
+            spkTimes(:,removeIndices) = [];
+            % overallInds(removeIndices) = [];
+
+            % warning('Remove duplicates done. Placing this warning so if we see it multiple times, we know this function is being called redundantly.');
+
+        end
 
     end
 
