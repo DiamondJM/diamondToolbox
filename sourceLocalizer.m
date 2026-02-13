@@ -76,7 +76,11 @@ classdef sourceLocalizer
             %
             % Note:
             %   You can build a wrapper that takes a subject name, loads the
-            %   relevant timeSeries, chanNames, and Fs, and passes them to spikesMain.
+            %   relevant timeSeries, chanNames, and Fs, and passes them to sourceLocalizer.
+
+            [~,currentPath] = fileparts(pwd);
+            assert(isequal(currentPath,'diamondToolbox'),'Please change directory to diamondToolbox.'); 
+            addpath(genpath(pwd)); 
 
             self.subj = subj;
             self.rootFolder = rootFolder;
