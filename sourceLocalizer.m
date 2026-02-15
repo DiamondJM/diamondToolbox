@@ -9,23 +9,14 @@ classdef sourceLocalizer
 
         braindata = struct('myBd',[],'myBp',[]);
 
-        spikeDetectionResults = struct('rasters',[],'waveforms',[],...
-            'paramStruct',struct(...
-            'seqWin',0.1,... seconds
-            'maxNegPeakWidth',0.05,... seconds
-            'peakWin', 0.1, ... % seconds
-            'ampScale',3,... z 
-            'trackPeaks',false,...
-            'zThresh',3)); 
-
+        spikeDetectionResults = struct('rasters',[],'waveforms',[],'paramStruct',struct())
         seqResults = struct('seriesAll',[],'timesAll',[]);
         sensors
 
-        sourceLocalizationResults = struct('localizationResults',[],'roiResults',[],...
-            'paramStruct', struct(...
-            'propagationSpeed',300,... % mm / s
-            'sensorDistance',30,... mm 
-            'subsensorLength',3)); 
+        seizureProcessingResults = struct;
+
+        sourceLocalizationResults = struct('localizationResults',[],'roiResults',[],'paramStruct',struct());
+        localizationMode = 'spikes'; % or seizures
 
 
         % These are defaults and can be adjusted.
@@ -38,6 +29,8 @@ classdef sourceLocalizer
         % subsensorLength = 3;
         % How many electrodes at a time (at minimum) should participate in
         % source localization.
+
+        deltaPosition
 
     end
 
@@ -79,8 +72,8 @@ classdef sourceLocalizer
             %   relevant timeSeries, chanNames, and Fs, and passes them to sourceLocalizer.
 
             [~,currentPath] = fileparts(pwd);
-            assert(isequal(currentPath,'diamondToolbox'),'Please change directory to diamondToolbox.'); 
-            addpath(genpath(pwd)); 
+            assert(isequal(currentPath,'diamondToolbox'),'Please change directory to diamondToolbox.');
+            addpath(genpath(pwd));
 
             self.subj = subj;
             self.rootFolder = rootFolder;
@@ -165,17 +158,19 @@ classdef sourceLocalizer
 
             if ~isempty(self.spikeDetectionResults.rasters) && ~forceNew; return; end
 
-            %%
+            %% Define parameters
 
-            fprintf('Calling spike detector with the following parameters. These are adjustable.\n'); 
-            disp(self.spikeDetectionResults.paramStruct); 
+            self.spikeDetectionResults.paramStruct = struct(...
+                'seqWin',0.1,... seconds
+                'maxNegPeakWidth',0.05,... seconds
+                'peakWin', 0.1, ... % seconds
+                'ampScale',3,... z
+                'trackPeaks',false,...
+                'zThresh',3);
 
-            % peakWin = 0.1;
-            % zThresh = 3;
-            % ampScale = 3;
-            % maxNegPeakWidth = 50; % ms
-            % maxNegPeakWidth = maxNegPeakWidth / 1000 * self.Fs; % Samples
-            % trackPeaks = false;
+            fprintf('Calling spike detector with the following parameters. These are adjustable.\n');
+            disp(self.spikeDetectionResults.paramStruct);
+
 
             self = self.findSpikeTimes;
 
@@ -198,29 +193,29 @@ classdef sourceLocalizer
             % addParameter(p,'peakSeparation',0);
             % addParameter(p,'trackPeaks',false);
             % addParameter(p,'maxPeakHeight',Inf);
-            % 
+            %
             % parse(p,varargin{:})
             % ampScale = p.Results.ampScale;
-            % 
+            %
             % maxNegPeakWidth = p.Results.maxNegPeakWidth;
             % maxPosPeakWidth = p.Results.maxPosPeakWidth;
             % trackPeaks = p.Results.trackPeaks;
             % peakSeparation = p.Results.peakSeparation;
             % maxPeakHeight = p.Results.maxPeakHeight;
 
-            % Kill the input parser 
+            % Kill the input parser
 
-            maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth; 
-            maxPosPeakWidth = Inf; 
+            maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth;
+            maxPosPeakWidth = Inf;
             trackPeaks = self.spikeDetectionResults.paramStruct.trackPeaks;
-            ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
-            peakSeparation = 0; 
-            maxPeakHeight = Inf; 
-            ctsThresh = 0; 
+            ampScale = self.spikeDetectionResults.paramStruct.ampScale;
+            peakSeparation = 0;
+            maxPeakHeight = Inf;
+            ctsThresh = 0;
             zThresh = self.spikeDetectionResults.paramStruct.zThresh;
             peakWin = self.spikeDetectionResults.paramStruct.peakWin;
 
-            % If you choose to mess around with ctsThresh or other 
+            % If you choose to mess around with ctsThresh or other
             % 'non-reported' parameters, feel free to pass them back with
             % self.spikeDetectionResults.paramStruct.
 
@@ -234,11 +229,11 @@ classdef sourceLocalizer
 
             %% load data and set up parameters/arrays
 
-            thisTs = self.timeSeries; 
+            thisTs = self.timeSeries;
             tsDims = size(thisTs);
 
             peakWinSamples = floor(peakWin*self.Fs); % window around peak; samples
-            maxNegPeakWidth = maxNegPeakWidth * self.Fs; % Samples 
+            maxNegPeakWidth = maxNegPeakWidth * self.Fs; % Samples
 
             %% find peaks based on polarity
 
@@ -358,7 +353,7 @@ classdef sourceLocalizer
             badCounts = sum(fullRaster) < ctsThresh;
             fullRaster(:,badCounts) = false;
 
-            %% Volume conduction 
+            %% Volume conduction
 
             [fullRaster,waveformsMaster] = self.removeVolCond_fromRaster(fullRaster,waveformsMaster);
 
@@ -535,45 +530,210 @@ classdef sourceLocalizer
         end
 
 
-        function self = localizationManagerSpikes(self,varargin)
+        function self = preparedeltaPosition(self)
+
+
+            switch self.localizationMode
+                case 'spikes'
+                    %% Preamble
+
+                    % Define parameters
+                    self.sourceLocalizationResults.paramStruct = struct(...
+                        'propagationSpeed',300,... % mm / s
+                        'sensorDistance',30,... mm
+                        'subsensorLength',3,...
+                        'distanceThresh', 30); % mm
+
+                    % Populate spikes
+                    self = self.populateSpikes;
+
+                    % Compute sequences
+                    self = self.computeSequences;
+
+                    % propagationSpeed = 300;
+                    % sensorDistance = 30;
+
+                    % Here, sensorDistance can basically be as far apart as we'd like, barring
+                    % concerns for the distance at which the signal can travel.
+                    % We do NOT have aliasing concerns like we did previously.
+                    % Before, a large sensorDistance meant that we required very low
+                    % frequencies, otherwise we'd have spatial aliasing.
+                    % Here, interictal sourceLoc are rare (rather than periodic) events. We assume
+                    % they arrive rarely, and so aliasing is not an issue. Since frequency of
+                    % these events are taken to be ~0, there's no upper limit on inter-sensor
+                    % distance (as dictated by frequency).
+
+                    self = self.getSensors;
+
+                    %% Collect series
+
+                    self = self.spikeSequenceToDeltaPosition;
+
+                case 'seizure'
+
+                    % Define parameters
+                    self.sourceLocalizationResults.paramStruct = struct(...
+                        'propagationSpeed',300,... % mm / s
+                        'sensorDistance',12,... mm
+                        'subsensorLength',4,...
+                        'distanceThresh', 30); % mm
+
+                    self = self.extractPhasePower;
+                    self = self.postProcessPhase;
+
+                    self = self.getSensors;
+
+                    self = self.phaseToDeltaPosition;
+
+            end
+
+        end
+
+
+        function self = extractPhasePower(self)
+
+            assert(exist('seizureWindowFilt','file'),'This file should exist in diamondToolbox/commonFiles/Filt. Please check paths.');
+
+            thisFilter = @seizureWindowFilt;
+            self.sourceLocalizationResults.paramStruct.filter = thisFilter;
+            thisFilter = thisFilter();
+
+            filtData = filtfilt(thisFilter.Numerator,1,self.timeSeries);
+            hilbertData = hilbert(filtData);
+            phase = angle(hilbertData);
+
+            freqData = self.Fs * diff(unwrap(phase)) / (2 * pi);
+            freqData = medfilt1(freqData,1000,'truncate');
+            freqData(end + 1,:) = freqData(end,:);
+
+            %% Process and pack
+
+            pow = abs(hilbertData);
+            realData = real(filtData);
+
+            self.seizureProcessingResults.phase = phase;
+            self.seizureProcessingResults.pow = pow;
+            self.seizureProcessingResults.freq = freqData;
+            self.seizureProcessingResults.real = realData;
+
+
+        end
+
+        function self = postProcessPhase(self)
+
+
+            %%%%%%
+            % Now post-process this data in such a way as to only pick the good data
+            %%%%%
+
+            % quantileVal = 0.10;
+
+            phase = self.seizureProcessingResults.phase;
+            pow = self.seizureProcessingResults.pow;
+
+            retainChans = 14;
+
+            for jj = 1:size(phase,1)
+
+                currentPow = pow(jj,:);
+                [~, ind] = sort(currentPow,'descend');
+
+                lowPowInds = ind(retainChans + 1:end);
+
+                phase(jj,lowPowInds) = nan;
+            end
+
+            pow(isnan(phase)) = nan;
+
+            fprintf('%.f percent of all phase data will be used. \n',sum(~isnan(phase(:))) / numel(phase) * 100);
+
+            self.seizureProcessingResults.phase = phase;
+            self.seizureProcessingResults.pow = pow;
+
+            self.sourceLocalizationResults.paramStruct.retainChans = retainChans;
+
+        end
+
+        function self = phaseToDeltaPosition(self)
+
+
+            %% Preamble
+
+            freqMaster = self.seizureProcessingResults.freq;
+            phaseMaster = self.seizureProcessingResults.phase;
+            sensorInds = self.sensors.sensorInds;
+
+            freqMean = mean(freqMaster,2,'omitnan');
+
+            % Let's find a bound on frequency difference informed by the doppler
+            % effect.
+            propagationSpeed = self.sourceLocalizationResults.paramStruct.propagationSpeed;
+            expectedSourceSpeed = 20;
+            acceptibleRatio = (propagationSpeed + expectedSourceSpeed) / (propagationSpeed - expectedSourceSpeed);
+
+            lengthTs = size(self.seizureProcessingResults.phase,1);
+            self.sourceLocalizationResults.paramStruct.acceptibleRatio = acceptibleRatio;
+
+            propagationSpeed = self.sourceLocalizationResults.paramStruct.propagationSpeed;
+
+            deltaPositionLocal = nan(size(sensorInds,1),lengthTs);
+
+            for ii = 1:size(sensorInds,1)
+                currentSensor = sensorInds(ii,:);
+
+                currentPhase = phaseMaster(:,currentSensor);
+                currentFreq = freqMaster(:,currentSensor);
+
+                validInds = all(~isnan(currentPhase),2);
+
+                [s,l] = bounds(currentFreq,2);
+                similarFreqLog = l ./ s < acceptibleRatio;
+
+                validInds = validInds & similarFreqLog;
+
+                currentPhase = currentPhase(validInds,:);
+                % currentFreq = currentFreq(validInds,:);
+                currentFreq = freqMean(validInds);
+                currentFreq = repmat(currentFreq,1,2);
+
+
+                % currentPhase = unwrap(currentPhase,[],2);
+                % Correct, but slower
+
+                for jj = 1:size(currentPhase,1)
+                    phaseRange = [-2 * pi + currentPhase(jj,2) currentPhase(jj,2) 2 * pi + currentPhase(jj,2)];
+                    [~,ind] = min(abs(currentPhase(jj,1) - phaseRange));
+                    currentPhase(jj,2) = phaseRange(ind);
+                end
+
+                currentPhase = currentPhase - mean(currentPhase,2);
+
+                deltaPositionLocal(ii,validInds) = -(currentPhase(:,1) * propagationSpeed ./ (2 * pi * currentFreq(:,1)) ...
+                    - currentPhase(:,2) * propagationSpeed ./ (2 * pi * currentFreq(:,2)));
+
+                % Positive distance --> currentSensor(1) is CLOSER than sensor(2)
+
+            end
+
+            self.deltaPosition = deltaPositionLocal;
+
+            fprintf('Finished computing deltaPosition, for seizure, subject %s. \n%.f percent of all computed phase differences used. \n',self.subj, sum(~isnan(deltaPositionLocal(:))) / numel(deltaPositionLocal) * 100);
+        end
+
+
+
+        function self = localizationManager(self,varargin)
 
             p = inputParser;
             addParameter(p,'plotting',true);
             parse(p,varargin{:})
             plotting = p.Results.plotting;
 
-
-            %% Preamble
-
-
-            % Populate spikes
-            self = self.populateSpikes;
-
-            % Compute sequences
-            self = self.computeSequences;
-
-            % propagationSpeed = 300;
-            % sensorDistance = 30;
-
-            % Here, sensorDistance can basically be as far apart as we'd like, barring
-            % concerns for the distance at which the signal can travel.
-            % We do NOT have aliasing concerns like we did previously.
-            % Before, a large sensorDistance meant that we required very low
-            % frequencies, otherwise we'd have spatial aliasing.
-            % Here, interictal sourceLoc are rare (rather than periodic) events. We assume
-            % they arrive rarely, and so aliasing is not an issue. Since frequency of
-            % these events are taken to be ~0, there's no upper limit on inter-sensor
-            % distance (as dictated by frequency).
-
-            self = self.getSensors;
-
-            %% Collect series
-
-            self = self.buildSeriesTable;
+            self = self.preparedeltaPosition; % Spikes or seizure agnostic call
 
             %% Onto localization
 
-            self = self.localizationFunctionSpikes;
+            self = self.localizationFunction;
 
             self = self.locDataToRoi;
 
@@ -638,12 +798,8 @@ classdef sourceLocalizer
 
             %% Load or create, unpack
 
-            if ~isempty(self.geodesic) && ~forceNew
-                assert(isequal(length(self.chanNames),length(self.geodesic.leadNames)));
-                return;
-            end
-
-
+            if ~isempty(self.geodesic) && ~isequal(length(self.chanNames),length(self.geodesic.leadNames)); forceNew = true; end
+            if ~isempty(self.geodesic) && ~forceNew; return; end
 
             geodesicMaster = self.collectGeodesicDistances_master('saving',saving);
 
@@ -825,7 +981,7 @@ classdef sourceLocalizer
 
         end
 
-        function self = buildSeriesTable(self)
+        function self = spikeSequenceToDeltaPosition(self)
 
             %% Preamble
 
@@ -927,7 +1083,7 @@ classdef sourceLocalizer
             % params.spikeTimes = spkTimes; % For various reasons I find it's helpful to pass this back in params.
             % params.spikeLeads = spkLeads;
 
-            self.sensors.seriesTable = seriesTable;
+            self.deltaPosition = seriesTable;
 
             % I think it's good to put this into the sensors struct,
             % because seriesTable should have the same height as
@@ -935,7 +1091,7 @@ classdef sourceLocalizer
 
         end
 
-        function self = localizationFunctionSpikes(self,varargin)
+        function self = localizationFunction(self,varargin)
 
             p = inputParser;
             addParameter(p,'forceNew',false);
@@ -950,12 +1106,10 @@ classdef sourceLocalizer
 
             tic
 
-            dPosition = self.sensors.seriesTable;
+            deltaPositionLocal = self.deltaPosition / self.Fs; % Seconds
+            deltaPositionLocal = deltaPositionLocal * self.sourceLocalizationResults.paramStruct.propagationSpeed; % mm
 
-            dPosition = dPosition / self.Fs; % Seconds
-            dPosition = dPosition * self.sourceLocalizationResults.paramStruct.propagationSpeed; % mm
-
-            lengthData = size(dPosition,2);
+            lengthData = size(deltaPositionLocal,2);
             sensorInds = self.sensors.sensorInds;
 
             myBp = self.braindata.myBp;
@@ -981,7 +1135,8 @@ classdef sourceLocalizer
             % ddMaster = zeros(size(sensors,1),size(geodesicMaster,2));
             boundsMaster = false(size(sensorInds,1),size(geodesicDistancesMaster,2));
 
-            distanceThresh = 30;  % mm
+            % distanceThresh = 30;  % mm
+            distanceThresh = self.sourceLocalizationResults.paramStruct.distanceThresh;
             % Beyond this distance, candidate source vertices are disregarded.
             % Literature (Smith, Schevon, Nat Comm 2016, among other work) suggests
             % that ~3cm is the ceiling above which neural signals are unlikely to
@@ -1016,10 +1171,10 @@ classdef sourceLocalizer
                 locTemp = nan(3,1);
 
                 % currentSubsensor = find(~isnan(drAll(:,jj)));
-                currentSubsensor = find(abs(dPosition(:,jj)) < distanceNorm * perceivedActualCutoff);
+                currentSubsensor = find(abs(deltaPositionLocal(:,jj)) < distanceNorm * perceivedActualCutoff);
                 % Perceived actual cutoff doesn't affect our source localization procedure itself. Rather, it
                 % LIMITS the number of electrode pairs included in our procedure. The
-                % reason is that, if dPosition(p,jj) is too close to distanceNorm(p),
+                % reason is that, if deltaPosition(p,jj) is too close to distanceNorm(p),
                 % for some sensor pair p, then the hyperbola starts to look like a
                 % hairpin, that is, very eccentrically-bent towards the electrode. This
                 % limits the number of available cortical surface points, which can
@@ -1040,7 +1195,7 @@ classdef sourceLocalizer
 
                 if length(currentSubsensor) < subsensorLength; continue; end
 
-                drSubsensor = dPosition(currentSubsensor,jj);
+                drSubsensor = deltaPositionLocal(currentSubsensor,jj);
 
 
                 % eligiblePoints = logical(sum(boundsMaster(currentSubsensor,:)));
@@ -1186,7 +1341,7 @@ classdef sourceLocalizer
             assert(~isempty(self.sourceLocalizationResults.localizationResults),'No data to plot.');
             self = self.locDataToRoi;
             roiResults = self.sourceLocalizationResults.roiResults;
-            vMapAll = {roiResults.vertexMap};
+            vertexMap = roiResults.vertexMap;
             % clim = roiResults.clim;
 
 
@@ -1198,58 +1353,63 @@ classdef sourceLocalizer
 
             % This section is only needed for timeWindow ~= 0.
 
-            maxColor = 0;
-            for jj = 1:length(vMapAll)
-                if isempty(vMapAll{jj}); continue; end
+            % maxColor = 0;
+            % for jj = 1:length(vertexMap)
+            %     if isempty(vertexMap{jj}); continue; end
+            % 
+            %     vertexMapLocal = vertexMap{jj};
+            % 
+            %     mapKeys = cell2mat(vertexMapLocal.keys);
+            %     VPerROI = cell(size(mapKeys));
+            %     valPerROI = zeros(size(mapKeys));
+            % 
+            %     for ii = 1:length(mapKeys)
+            %         roiStruct = vertexMapLocal(mapKeys(ii));
+            %         VPerROI{ii} = roiStruct.roi;
+            %         valPerROI(ii) = roiStruct.count;
+            %     end
+            %     isLeft = sign(mapKeys) == -1;
+            % 
+            %     if all(isLeft)
+            %         currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','lh');
+            %     elseif all(~isLeft)
+            %         currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','rh');
+            %     else
+            %         [isLeft,sortInds] = sort(isLeft,'descend');
+            %         VPerROI = VPerROI(sortInds);
+            %         valPerROI = valPerROI(sortInds);
+            %         rh_begin = find(~isLeft,1);
+            % 
+            %         currentMax = findMaxColor(myBp, VPerROI, valPerROI,'rh_begin',rh_begin);
+            % 
+            %     end
+            %     maxColor = max(maxColor,currentMax);
+            % end
+            % % fprintf('Max color is %.f. \n',maxColor);
 
-                vertexMap = vMapAll{jj};
-
-                mapKeys = cell2mat(vertexMap.keys);
-                VPerROI = cell(size(mapKeys));
-                valPerROI = zeros(size(mapKeys));
-
-                for ii = 1:length(mapKeys)
-                    roiStruct = vertexMap(mapKeys(ii));
-                    VPerROI{ii} = roiStruct.roi;
-                    valPerROI(ii) = roiStruct.count;
-                end
-                isLeft = sign(mapKeys) == -1;
-
-                if all(isLeft)
-                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','lh');
-                elseif all(~isLeft)
-                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','rh');
-                else
-                    [isLeft,sortInds] = sort(isLeft,'descend');
-                    VPerROI = VPerROI(sortInds);
-                    valPerROI = valPerROI(sortInds);
-                    rh_begin = find(~isLeft,1);
-
-                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'rh_begin',rh_begin);
-
-                end
-                maxColor = max(maxColor,currentMax);
-            end
-            % fprintf('Max color is %.f. \n',maxColor);
-
-            clim = [0 maxColor];
+            maxColor = self.sourceLocalizationResults.roiResults.maxValAll; 
+            clim = [0 max(maxColor)];
+            % Why not just use the maxColor pulled from ROIs? I think the
+            % maxColor created from findMaxColor is slightly different, but
+            % I'm not hugely intrigued by the prospect of sorting out why
+            % right now, and we can just do it this way for now. 
 
             %% Plot what we have
 
             lastPlot = false;
 
-            for jj = 1:length(vMapAll)
+            for jj = 1:length(vertexMap)
 
-                if ~isempty(vMapAll{jj})
+                if ~isempty(vertexMap{jj})
 
-                    vertexMap = vMapAll{jj};
+                    vertexMapLocal = vertexMap{jj};
 
-                    mapKeys = cell2mat(vertexMap.keys);
+                    mapKeys = cell2mat(vertexMapLocal.keys);
                     VPerROI = cell(size(mapKeys));
                     valPerROI = zeros(size(mapKeys));
 
                     for ii = 1:length(mapKeys)
-                        roiStruct = vertexMap(mapKeys(ii));
+                        roiStruct = vertexMapLocal(mapKeys(ii));
                         VPerROI{ii} = roiStruct.roi;
                         valPerROI(ii) = roiStruct.count;
                     end
@@ -1261,16 +1421,16 @@ classdef sourceLocalizer
                     if lastPlot; myBp.clearRegions(); end
 
                     if all(isLeft)
-                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','lh','clim',clim);
+                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','lh','clim',clim,'cmap',turbo);
                     elseif all(~isLeft)
-                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','rh','clim',clim);
+                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','rh','clim',clim,'cmap',turbo);
                     else
                         [isLeft,sortInds] = sort(isLeft,'descend');
                         VPerROI = VPerROI(sortInds);
                         valPerROI = valPerROI(sortInds);
                         rh_begin = find(~isLeft,1);
 
-                        myBp.plotRegionsData(VPerROI, valPerROI,'rh_begin',rh_begin,'clim',clim);
+                        myBp.plotRegionsData(VPerROI, valPerROI,'rh_begin',rh_begin,'clim',clim,'cmap',turbo);
                     end
                     fprintf('%d ROICs plotted; %d total ROI hits. \n',length(mapKeys),sum(valPerROI));
                     lastPlot = true;
@@ -1290,17 +1450,15 @@ classdef sourceLocalizer
 
             p = inputParser;
             addParameter(p,'forceNew',false);
-            % addParameter(p,'timeWindow',0);
+            addParameter(p,'timeWindow',0); % Seconds
             parse(p,varargin{:})
             forceNew = p.Results.forceNew;
-            % timeWindow = p.Results.timeWindow;
+            timeWindow = p.Results.timeWindow;
 
-            % timeWindow appears to be deprecated (in the spikes version).
-            % Maybe working in the seizure version?
-
+            if isequal(self.localizationMode,'spikes'); assert(~timeWindow); end
             if ~forceNew && ~isempty(self.sourceLocalizationResults.roiResults); return; end
 
-            self = self.localizationFunctionSpikes; % Needs to be done; no need to pass forceNew;
+            self = self.localizationFunction; % Needs to be done; no need to pass forceNew;
 
             self = self.retrieveBraindata;
             myBd = self.braindata.myBd;
@@ -1308,72 +1466,92 @@ classdef sourceLocalizer
             roiRadius = Inf;
             sumEmpty = 0;
 
+            thisLocalizationResults = self.sourceLocalizationResults.localizationResults;
+            lengthTs = size(thisLocalizationResults,2);
+
+            if ~timeWindow; timeWindowSamples = lengthTs; % Samples
+            else; timeWindowSamples = timeWindow * self.Fs; % Samples
+            end
+            % Set timeWindow to lengthTs if 0, so that this just creates a
+            % single step in timeBuffer. 
+
+            stepsBuffer = buffer(1:lengthTs,timeWindowSamples);
+            vMapAll = cell(size(stepsBuffer,2),1);
+
+            maxValAll = zeros(1,size(stepsBuffer,2));
+
             %%
 
-            currentLocs = self.sourceLocalizationResults.localizationResults;
-            currentLocs(:,isnan(currentLocs(1,:))) = [];
+            for jj = 1:size(stepsBuffer,2)
 
-            assert(~isempty(currentLocs),'No localization.');
+                maxVal = 0;
 
+                currentTime = stepsBuffer(:,jj);
+                currentTime = currentTime(logical(currentTime));
 
-            currentVertices = currentLocs(1,:);
+                currentLocs = thisLocalizationResults(:,ismember(thisLocalizationResults(3,:),currentTime));
 
-            uniqueVertex = unique(currentVertices);
-            vertexMap = containers.Map('keyType','double','valueType','any');
+                currentVertices = currentLocs(1,:);
 
-            %%
+                if isempty(currentVertices); continue; end
+                uniqueVertex = unique(currentVertices);
 
-            for vertIndex = uniqueVertex
-                currentInds = find(currentVertices==vertIndex);
-                numVertices = length(currentInds);
+                vertexMap = containers.Map('keyType','double','valueType','any');
 
-                isLeft = sign(vertIndex) == -1;
+                for vertIndex = uniqueVertex
+                    currentInds = find(ismember(currentVertices,vertIndex));
+                    numVertices = length(currentInds);
 
-                if isLeft; surfString = 'lh'; currentSign = -1;
-                else; surfString = 'rh'; currentSign = 1;
-                end
-                % Let's give left-sided vertices a negative sign.
+                    isLeft = sign(vertIndex) == -1;
 
-                [roicUnique, ~, roiOutput] = myBd.vertex2ROI(abs(vertIndex),surfString,roiRadius);
-                if isempty(roicUnique); sumEmpty = sumEmpty + numVertices; continue; end
+                    if isLeft; surfString = 'lh'; currentSign = -1;
+                    else; surfString = 'rh'; currentSign = 1;
+                    end
+                    % Let's give left-sided vertices a negative sign.
 
-                roicUnique = revertToVector(roicUnique);
-                roicAll = roiOutput.ROIC_mesh_ndx;
+                    [roicUnique, ~, roiOutput] = myBd.vertex2ROI(abs(vertIndex),surfString,roiRadius);
 
-                for roicIndex = roicUnique
+                    if isempty(roicUnique); sumEmpty = sumEmpty + numVertices; continue; end
+                    roicUnique = roicUnique';
+                    roiAll = roiOutput.ROIC_mesh_ndx;
 
-                    %% Upload, second-wise
+                    for roicIndex = roicUnique
 
-                    if isKey(vertexMap,roicIndex * currentSign)
-                        roiStruct = vertexMap(roicIndex * currentSign);
-                    else
-                        roiStruct = struct;
-                        roiStruct.count = 0;
-                        roiStruct.roi = roiOutput.vertex(roicAll == roicIndex);
-                        roiStruct.times = zeros(1,0);
+                        if isKey(vertexMap,roicIndex * currentSign)
+                            roiStruct = vertexMap(roicIndex * currentSign);
+                            roiStruct.count = roiStruct.count + numVertices;
+                        else
+                            roiStruct = struct;
+                            roiStruct.count = numVertices;
+                            roiStruct.roi = roiOutput.vertex(roiAll == roicIndex);
+                        end
+
+                        maxVal = max(maxVal,roiStruct.count);
+                        vertexMap(roicIndex * currentSign) = roiStruct;
                     end
 
-                    roiStruct.count = roiStruct.count + numVertices;
-                    roiStruct.times = [roiStruct.times currentLocs(3,currentInds)];
-
-                    vertexMap(roicIndex * currentSign) = roiStruct;
-
                 end
+
+                vMapAll{jj} = vertexMap;
+
+                maxValAll(jj) = maxVal;
+
             end
+
+            %%
 
             if sumEmpty; fprintf('%d unrecognized vertices found for %s.\n',sumEmpty,self.subj); end
             % fprintf('ROI data computed in %.1f seconds. \n',toc)
 
             roiResults = struct;
-            roiResults.vertexMap = vertexMap;
-            roiResults.timeWindow = 0;
+            roiResults.vertexMap = vMapAll;
+            roiResults.timeWindow = timeWindow;
             roiResults.roiRadius = roiRadius;
+            roiResults.maxValAll = maxValAll; 
 
             self.sourceLocalizationResults.roiResults = roiResults;
 
         end
-
-
 
     end
 

@@ -262,9 +262,9 @@ classdef braindata2 < handle
                 bd.docs.jacksheet = readtableSafe(bd.filepaths.jacksheet);
             end
             
-            if exist(bd.filepaths.element_info, 'file')
-                bd.docs.element_info = getElementInfo([],[], bd.filepaths.element_info);
-            end
+            % if exist(bd.filepaths.element_info, 'file')
+            %     bd.docs.element_info = getElementInfo([],[], bd.filepaths.element_info);
+            % end
             bd.printf('Done!\n');
         end
         function load_roi(bd)
@@ -281,9 +281,12 @@ classdef braindata2 < handle
                 bd.roi.roic_lead_bipo = data.(char(fieldnames(data)));
             end
 
-            localizer_rois(bd.subj,pullServerDirectory,1);
+            localizer_rois(bd.subj,bd.rootEEGdir,1);
             % JD edit: force new localizer to run. 
-            fprintf('There was an issue with how the localization data was originally run, where ')
+            fprintf('There was an issue with how the localization data was originally run, where only a subset of ROIs were retained. Therefore we have to re-run the ROI generation procedure at this time.'); 
+            % In the future, the whole localization pipeline could be rerun
+            % with the proper change made to localizer_rois. In that case,
+            % this call would not be necessary. 
 
             
             if isfield(bd.filepaths, 'roic_roi_lh') && exist(bd.filepaths.roic_roi_lh, 'file')

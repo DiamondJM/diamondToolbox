@@ -1235,7 +1235,7 @@ classdef brainplotter < handle
                 % Normalize to bounds
                 vertexData = (vertexData - clim(1)) / range(clim);
                 % Times 64
-                vertexData = round(vertexData * 64);
+                vertexData = round(vertexData * size(cmap,1));
                 
                 vertexData = squeeze(ind2rgb(vertexData,cmap));
             end

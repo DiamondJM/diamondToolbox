@@ -1,4 +1,4 @@
-function [Hd,Fpass1,Fpass2] = joshSeizureWindowFilt
+function [Hd,Fpass1,Fpass2] = seizureWindowFilt
 %FILTERSEIZUREWINDOW Returns a discrete-time filter object.
 
 % MATLAB Code

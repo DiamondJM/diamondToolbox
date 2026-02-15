@@ -262,9 +262,9 @@ classdef braindata2 < handle
                 bd.docs.jacksheet = readtableSafe(bd.filepaths.jacksheet);
             end
             
-            if exist(bd.filepaths.element_info, 'file')
-                bd.docs.element_info = getElementInfo([],[], bd.filepaths.element_info);
-            end
+            % if exist(bd.filepaths.element_info, 'file')
+            %     bd.docs.element_info = getElementInfo([],[], bd.filepaths.element_info);
+            % end
             bd.printf('Done!\n');
         end
         function load_roi(bd)
