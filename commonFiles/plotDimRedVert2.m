@@ -2,7 +2,7 @@ function pcaInfo = plotDimRedVert2(mySingleton,varargin)
 
 %% Preamble
 
-assert(length(mySingleton)==1); 
+assert(isscalar(mySingleton)); 
 % Need to make sure the above plays nicely with everything else. 
 
 p = inputParser;
