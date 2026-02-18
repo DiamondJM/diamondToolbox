@@ -65,7 +65,7 @@ function pial_nn = lead_to_pial(leads_xyz, dural_xyz, pial_xyz, r, snap_to_dura_
         baseSphere = permute([x(:),y(:),z(:)], [3 2 1]);
         spheres = repmat(baseSphere, nleads, 1); % spheres will be lead X [x,y,z] X npoints^2
         
-        if strfind(lower(which('knnsearch')), 'ielvis')
+        if contains(lower(which('knnsearch')), 'ielvis')
             error('Remove bad knnsearch from path: ielvis');
         end
         
@@ -82,7 +82,7 @@ function pial_nn = lead_to_pial(leads_xyz, dural_xyz, pial_xyz, r, snap_to_dura_
 
     N_PIAL_WARN_NODE = 100;
     if any(cellfun(@numel, pial_nn) > N_PIAL_WARN_NODE)
-        warning('lead_to_pial: large numbers of pial nodes found for at least 1 lead (bad which(knnserach)?) ');
+        warning('lead_to_pial: large numbers of pial nodes found for at least 1 lead (bad which(knnsearch)?) ');
     end
 
 end

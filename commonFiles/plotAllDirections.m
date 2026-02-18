@@ -1,4 +1,4 @@
-function plotAllDirections(mySingleton)
+function plotAllDirections(myStruct)
 
 lLat = [270,0];
 rLat = [-270,0];
@@ -7,7 +7,7 @@ vSup = [90,90];
 
 clf
 subplot(2,2,1)
-plotSurfFun(mySingleton)
+myStruct.plotSurfFun;
 view(lLat(1),lLat(2))
 ax = gca;
 

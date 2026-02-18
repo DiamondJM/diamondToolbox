@@ -97,7 +97,7 @@ classdef sourceLocalizer
         end
 
 
-        function self = retrieveBraindata(self,varargin)
+        function [self,myBd,myBp] = retrieveBraindata(self,varargin)
 
             %% Preamble
 
@@ -109,26 +109,26 @@ classdef sourceLocalizer
             forceNew = p.Results.forceNew;
             saving = p.Results.saving;
 
-            if ~forceNew && ~isempty(self.braindata.myBd); return; end
+            if ~forceNew && ~isempty(self.braindata.myBd)
+                myBd = self.braindata.myBd; 
+                myBp = self.braindata.myBp; 
+                return; 
+            end
 
             %%
 
             assert(exist('braindata2', 'file') == 2, 'braindata2 not found on path. Please check paths. Navigate to diamondToolbox and use addpath(genpath(pwd)).');
             assert(exist('brainplotter', 'file') == 2, 'brainplotter not found on path. Please check paths. Navigate to diamondToolbox and use addpath(genpath(pwd)).');
 
-            subjDir = fullfile(self.subjFolder,'braindata');
+            subjDir = fullfile(self.subjFolder);
 
-            fName = fullfile(subjDir,'bdBpFull.mat');
+            fName = fullfile(subjDir,sprintf('brainData_%s.mat',self.subj));
 
             if exist(fName','file') == 2 && ~forceNew
                 S = load(fName,'myBd','myBp');
                 myBp = S.myBp;
                 myBd = S.myBd;
             else
-
-                if forceNew && saving; rmdir(subjDir,'s'); end
-                % This can be handled by determining whether or not forceNew is passed
-                % into localizer_rois.
 
                 fprintf('Creating braindata objects for %s.\n',self.subj);
                 % root = '/Volumes/Shares/FRNU/dataWorking/sz';
@@ -137,6 +137,7 @@ classdef sourceLocalizer
                 myBp = ez_get_plotter(myBd);
 
                 if saving
+                    if isfolder(subjDir); rmdir(subjDir,'s'); end
                     mkdir(fullfile(subjDir));
                     save(fullfile(subjDir,'bdBpFull'),'myBd','myBp')
                 end
@@ -156,25 +157,37 @@ classdef sourceLocalizer
 
             p = inputParser;
             addParameter(p,'plotting',true);
+            addParameter(p,'forceNew',false);
+            parse(p,varargin{:})
             parse(p,varargin{:})
             plotting = p.Results.plotting;
+            forceNew = p.Results.forceNew;
 
-            self = self.prepareDeltaPosition; % Differential handling for spikes and seizures
+
+            self = self.prepareDeltaPosition('forceNew',forceNew); % Differential handling for spikes and seizures
 
             %% Onto localization
 
-            self = self.localizationFunction; % Spikes or seizure agnostic call
+            self = self.localizationFunction('forceNew',forceNew); % Spikes or seizure agnostic call
             self = self.locDataToRoi;
 
             %% Plot
 
             if ~plotting; return; end
-            self.plotSurfFun;
+            % self.plotSurfFun;
+
+            self.plotDimensionsReducedWrapper; 
 
         end
 
-        function self = prepareDeltaPosition(self)
+        function self = prepareDeltaPosition(self,varargin)
 
+            p = inputParser;
+            addParameter(p,'forceNew',false);
+            parse(p,varargin{:})
+            forceNew = p.Results.forceNew;
+
+            if ~forceNew && ~isempty(self.deltaPosition); return; end
 
             switch self.localizationMode
                 case 'spikes'
@@ -1013,8 +1026,7 @@ classdef sourceLocalizer
 
             tic
 
-            self = self.retrieveBraindata;
-            myBd = self.braindata.myBd; myBp = self.braindata.myBp;
+            [self, myBd, myBp] = self.retrieveBraindata;
 
             fprintf('Building geodesic distances for %s. \n',self.subj);
 
@@ -1288,7 +1300,10 @@ classdef sourceLocalizer
             fprintf('%.f percent of samples gave rise to a localization, for a total of %d localized points. \n',sum(~isnan(localizationResults(2,:))) / lengthData * 100,sum(~isnan(localizationResults(2,:))));
 
 
+
             %% Quality control?
+
+            localizationResults(:,isnan(localizationResults(1,:))) = []; 
 
             qualityControlThresh = 10; % mm;
             badInds = localizationResults(2,:) > qualityControlThresh;
@@ -1303,6 +1318,10 @@ classdef sourceLocalizer
             self.sourceLocalizationResults.paramStruct.perceivedActualCutoff = perceivedActualCutoff;
 
             self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
+
+            self.sourceLocalizationResults.paramStruct.meta.subj = self.subj; 
+            self.sourceLocalizationResults.paramStruct.meta.localizationMode = self.localizationMode;
+            % Others? 
 
 
         end
@@ -1323,8 +1342,7 @@ classdef sourceLocalizer
 
             self = self.localizationFunction; % Needs to be done; no need to pass forceNew;
 
-            self = self.retrieveBraindata;
-            myBd = self.braindata.myBd;
+            [self, myBd] = self.retrieveBraindata;
 
             roiRadius = Inf;
             sumEmpty = 0;
@@ -1432,9 +1450,7 @@ classdef sourceLocalizer
             % For seizure source info
             %%%%
 
-            self = self.retrieveBraindata;
-            myBp = self.braindata.myBp;
-            myBd = self.braindata.myBd;
+            [self, myBd, myBp] = self.retrieveBraindata;
 
             isLeftInds = self.geodesic.isLeftInds;
             useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
@@ -1564,6 +1580,160 @@ classdef sourceLocalizer
 
         end
 
+        function self = plotDimensionsReducedWrapper(self,varargin)
+
+            p = inputParser;
+            addParameter(p,'colorMode','auto'); % timing; heatmap
+            parse(p,varargin{:})
+            colorMode = p.Results.colorMode;
+
+
+            figure
+
+            useMatrices = {[1 0 0; 0 1 0; 0 0 1],... axial 
+                [1 0 0; 0 0 1; 0 1 0],... coronal 
+                [0 0 1; 1 0 0; 0 1 0]}; %  sagittal
+
+            for ii = 1:length(useMatrices)
+
+                subplot(1,length(useMatrices),ii) 
+                self = self.plotDimensionReduced('coeff',useMatrices{ii},'colorMode',colorMode);
+
+            end
+
+        end
+
+        function self = plotDimensionReduced(self,varargin)
+
+            p = inputParser;
+            addParameter(p,'colorMode','auto'); % timing; heatmap 
+            addParameter(p,'coeff',eye(3)); % eye(3) for axial; [1 0 0; 0 0 1; 0 1 0] for coronal; [0 0 1; 1 0 0; 0 1 0] for sagittal 
+            parse(p,varargin{:})
+            colorMode = p.Results.colorMode;
+            coeff = p.Results.coeff; 
+
+
+            %% Preamble
+
+            [self, ~, myBp] = self.retrieveBraindata; 
+
+            currentVertices = self.sourceLocalizationResults.localizationResults(1,:);
+            locationsMaster = self.convertVerticesToLocations(myBp, currentVertices);
+
+            assert(~isempty(locationsMaster),'No localization for %s.',self.subj); 
+
+            %% Process dimension reduction.
+
+            score = locationsMaster * coeff;
+            % score = (locationsMaster - mu) * coeff;
+            [a,b,c] = unique(currentVertices,'stable');
+            score = score(b,:);
+
+            % The above should index into a, where each element is the number of
+            % appearances of a.
+
+            % We can sort by size so we plot largest first
+
+            % locsCounts = histcounts(categorical(c)); 
+            % [~,sortCount] = sort(locsCounts,'ascend');
+            % sortCount = randperm(size(score,1));
+            % sortCount = 1:size(score,1);
+            % sortCount = size(score,1):-1:1;
+            % score = score(sortCount,:);
+            % locsCounts = locsCounts(sortCount);
+            % countVals = normalizeToBounds(locsCounts,[8 100]);  % Scaling
+
+            inRange = squareform(pdist(locationsMaster));
+            currentRad = 2;
+            inRange = sum(inRange <= currentRad);
+            inRange = inRange(b); 
+
+            [inRange,sortCount] = sort(inRange,'descend'); 
+            score = score(sortCount,:);
+
+            % maxDensity = max(inRange) / (4/3 * pi * currentRad ^ 3);
+            maxDensity = max(inRange);
+            fprintf('Max density is %.2f.\n',maxDensity);
+
+            % countVals = normalizeToBounds(inRange,[15 50],[1 108]); warning('Scaling.');
+            countVals = normalizeToBounds(inRange,[15 50]);
+
+            % locMode = self.sourceLocalizationResults.paramStruct.meta.localizationMode; 
+            locMode = self.localizationMode; 
+
+            if isequal(colorMode,'auto')
+
+                switch locMode
+                    case 'spikes'; colorMode = 'heatmap'; 
+                    case 'seizure'; colorMode = 'timing'; 
+                end
+            elseif isequal(colorMode,'timing')
+                if isequal(locMode,'spikes'); warning('Spike localization results will be colored according to timing, but timing is probably meaningless.'); 
+                elseif isequal(locMode,'seizure'); fprintf('Hint: try passing ''colorMode'',''heatmap'' to view results in terms of localization density, rather than in terms of timing.'); 
+                end
+                % timing mode intended for seizures. 
+            end
+
+            switch colorMode
+
+                case 'heatmap'
+                    cmap = turbo;
+                    colorVals = round(normalizeToBounds(inRange,[1 size(cmap,1)]));
+                    colorVals = cmap(colorVals,:);
+
+                case 'timing'
+                    cmap = parula;
+
+                    colorVals = zeros(size(a));
+
+                    for jj = 1:length(a)
+                        colorVals(jj) = mean(self.sourceLocalizationResults.localizationResults(3,self.sourceLocalizationResults.localizationResults(1,:)==a(jj)));
+                    end
+                    colorVals = round(normalizeToBounds(colorVals,[1 size(cmap,1)]));
+                    colorVals = colorVals(sortCount);
+
+                    colorVals = cmap(colorVals,:);
+
+            end
+
+            %% Plot
+
+            % figure
+            cla; hold on
+
+            boundaryVert = [myBp.surfaces.pial_lh.vertices; myBp.surfaces.pial_rh.vertices];
+            boundaryVert = boundaryVert * coeff;
+            boundaryVert = boundaryVert(1:10:end,:);
+            boundaryVert = double(boundaryVert(:,[1 2]));
+            boundInds = boundary(boundaryVert(:,1),boundaryVert(:,2));
+            plot(boundaryVert(boundInds,1),boundaryVert(boundInds,2),'k-','linewidth',2);
+            
+            for ii = 1:size(score,1)
+                plot(score(ii,1),score(ii,2),'.', ...
+                    'color',colorVals(ii,:),...
+                    'MarkerSize',countVals(ii))
+            end
+
+            %% Formatting
+
+            [d1, d0] = self.coeffToOrientation(coeff);
+
+            axis equal
+            set(gca,'DataAspectRatio',[1 1 1])
+            % set(gca,'PlotBoxAspectRatio',[3 4 4])
+            box on
+
+
+            xticks(xlim); yticks(ylim);
+            % xticklabels([d0(1,1) d1(1,1)]);
+            % yticklabels([d0(2,1) d1(2,1)]);
+            xticklabels({sprintf('%s',d0{1,1}), sprintf('%s',d1{1,1})});
+            yticklabels({sprintf('%s',d0{2,1}), sprintf('%s',d1{2,1})});
+
+
+        end
+
+
 
     end
 
@@ -1648,6 +1818,96 @@ classdef sourceLocalizer
             end
 
         end
+
+        function vert = convertLocationsToVertices(myBp,locations)
+
+            vertL = myBp.surfaces.pial_lh.vertices;
+            vertR = myBp.surfaces.pial_rh.vertices;
+
+            stdVert = myBp.stdNumVert;
+
+            vertAll = [vertL;vertR];
+
+            [~,vert] = min(pdist2(vertAll,locations));
+
+            isLeft = vert <= stdVert;
+            vert(isLeft) = vert(isLeft) * -1;
+            vert(~isLeft) = vert(~isLeft) - stdVert;
+
+        end
+        
+        function locations = convertVerticesToLocations(myBp,vertices)
+
+            % Negative numbers in vertices should indicate left hemisphere.
+            % Vertices are bounded between 1 and 198812, the number of
+            % vertices on a standard pial surface. 
+
+            %% Preamble
+
+
+            lVertices = myBp.surfaces.pial_lh.vertices;
+            rVertices = myBp.surfaces.pial_rh.vertices;
+
+
+
+            %% Let's distribute our data into a master map.
+
+            locations = nan(length(vertices),3); 
+
+            for ii = 1:length(vertices)
+                isLeft = sign(vertices(ii)) == -1;
+                if isLeft; currentVert = lVertices;
+                else; currentVert = rVertices;
+                end
+
+                if isnan(vertices(ii)); continue; end
+
+                locations(ii,:) = currentVert(abs(vertices(ii)),:);
+            end
+
+        end
+
+        function [d1, d0] = coeffToOrientation(coeff)
+
+
+            % Orientation is RAS
+            oPos = {'Right','Anterior','Superior'};
+            oNeg = {'Left','Posterior','Inferior'};
+            d1 = cell(3,3);
+            d0 = d1;
+
+            if size(coeff,2) < 3
+                coeffTemp = zeros(3);
+                coeffTemp(:,1:size(coeff,2)) = coeff;
+                coeff = coeffTemp;
+            end
+
+            orientationPC = eye(3) * coeff';
+
+            for ii = 1:3
+                [~,inds] = sort(abs(orientationPC(ii,:)),'descend');
+
+                posInds = sign(orientationPC(ii,inds)) == 1;
+
+
+                d1(ii, posInds) = oPos(inds(posInds));
+                d1(ii, ~posInds) = oNeg(inds(~posInds));
+
+                d0(ii, posInds) = oNeg(inds(posInds));
+                d0(ii, ~posInds) = oPos(inds(~posInds));
+
+
+
+            end
+
+
+            % Each ROW of d provides the biggest, medium, and smallest influence of the
+            % initial dimensions, into that row.
+
+
+
+        end
+
 
 
 
