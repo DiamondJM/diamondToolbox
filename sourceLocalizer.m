@@ -1340,8 +1340,17 @@ classdef sourceLocalizer
             forceNew = p.Results.forceNew;
             timeWindow = p.Results.timeWindow;
 
-            if isequal(self.localizationMode,'spikes'); assert(~timeWindow); end
             if ~forceNew && ~isempty(self.sourceLocalizationResults.roiResults); return; end
+
+            if isequal(self.localizationMode,'spikes'); assert(~timeWindow);
+            elseif isequal(self.localizationMode,'seizure') && ~timeWindow
+                fprintf('\n%s\n', repmat('%', 1, 70));
+                fprintf('NOTE: You are localizing with seizures, but timeWindow was passed\n');
+                fprintf('as 0. This is perfectly reasonable, but if you''d like to call\n');
+                fprintf('plotSurfFun and watch a video of the seizure as it unfolds over\n');
+                fprintf('time, pass in timeWindow = 1 (in seconds) or any other value.\n');
+                fprintf('%s\n\n', repmat('%', 1, 70));
+            end
 
             self = self.localizationFunction; % Needs to be done; no need to pass forceNew;
 
@@ -1351,10 +1360,13 @@ classdef sourceLocalizer
             sumEmpty = 0;
 
             thisLocalizationResults = self.sourceLocalizationResults.localizationResults;
-            % lengthTs = size(thisLocalizationResults,2);
-            lengthTs = self.sourceLocalizationResults.paramStruct.originalSize; 
 
-            if ~timeWindow; timeWindowSamples = lengthTs; % Samples
+            % lengthTs = size(thisLocalizationResults,2);
+            lengthTs = self.sourceLocalizationResults.paramStruct.originalSize;
+
+            if ~timeWindow
+                timeWindowSamples = lengthTs; % Samples
+
             else; timeWindowSamples = timeWindow * self.Fs; % Samples
             end
             % Set timeWindow to lengthTs if 0, so that this just creates a
@@ -1483,55 +1495,8 @@ classdef sourceLocalizer
             vertexMap = roiResults.vertexMap;
             % clim = roiResults.clim;
 
-
-            %% Find max color
-
-            % The coloring is subject to the amount of ROI hits and so is difficult to
-            % predict before mapping the data to ROIs. Therefore first we determine max
-            % color, and then we plot.
-
-            % This section is only needed for timeWindow ~= 0.
-
-            maxColor = 0;
-            for jj = 1:length(vertexMap)
-                if isempty(vertexMap{jj}); continue; end
-
-                vertexMapLocal = vertexMap{jj};
-
-                mapKeys = cell2mat(vertexMapLocal.keys);
-                VPerROI = cell(size(mapKeys));
-                valPerROI = zeros(size(mapKeys));
-
-                for ii = 1:length(mapKeys)
-                    roiStruct = vertexMapLocal(mapKeys(ii));
-                    VPerROI{ii} = roiStruct.roi;
-                    valPerROI(ii) = roiStruct.count;
-                end
-                isLeft = sign(mapKeys) == -1;
-
-                if all(isLeft)
-                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','lh');
-                elseif all(~isLeft)
-                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','rh');
-                else
-                    [isLeft,sortInds] = sort(isLeft,'descend');
-                    VPerROI = VPerROI(sortInds);
-                    valPerROI = valPerROI(sortInds);
-                    rh_begin = find(~isLeft,1);
-
-                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'rh_begin',rh_begin);
-
-                end
-                maxColor = max(maxColor,currentMax);
-            end
-            % fprintf('Max color is %.f. \n',maxColor);
-
-            maxColor = self.sourceLocalizationResults.roiResults.maxValAll; 
-            clim = [0 max(maxColor)];
-            % Why not just use the maxColor pulled from ROIs? I think the
-            % maxColor created from findMaxColor is slightly different, but
-            % I'm not hugely intrigued by the prospect of sorting out why
-            % right now, and we can just do it this way for now. 
+            maxColor = max(self.sourceLocalizationResults.roiResults.maxValAll); 
+            colorLimits = [0 max(maxColor)];
 
             %% Plot what we have
 
@@ -1556,25 +1521,25 @@ classdef sourceLocalizer
 
                     isLeft = sign(mapKeys) == -1;
 
-                    axes(ax);
+                    % axes(ax);
                     if lastPlot; myBp.clearRegions(); end
 
                     if all(isLeft)
-                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','lh','clim',clim,'cmap',turbo);
+                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','lh','clim',colorLimits,'cmap',turbo);
                     elseif all(~isLeft)
-                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','rh','clim',clim,'cmap',turbo);
+                        myBp.plotRegionsData(VPerROI, valPerROI,'surf','rh','clim',colorLimits,'cmap',turbo);
                     else
                         [isLeft,sortInds] = sort(isLeft,'descend');
                         VPerROI = VPerROI(sortInds);
                         valPerROI = valPerROI(sortInds);
                         rh_begin = find(~isLeft,1);
 
-                        myBp.plotRegionsData(VPerROI, valPerROI,'rh_begin',rh_begin,'clim',clim,'cmap',turbo);
+                        myBp.plotRegionsData(VPerROI, valPerROI,'rh_begin',rh_begin,'clim',colorLimits,'cmap',turbo);
                     end
                     fprintf('%d ROICs plotted; %d total ROI hits. \n',length(mapKeys),sum(valPerROI));
                     lastPlot = true;
                 elseif lastPlot
-                    axes(ax);
+                    % axes(ax);
                     myBp.clearRegions();
                     lastPlot = false;
                 end
