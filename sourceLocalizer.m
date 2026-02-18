@@ -1319,6 +1319,9 @@ classdef sourceLocalizer
 
             self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
 
+
+            self.sourceLocalizationResults.paramStruct.originalSize = lengthData; 
+
             self.sourceLocalizationResults.paramStruct.meta.subj = self.subj; 
             self.sourceLocalizationResults.paramStruct.meta.localizationMode = self.localizationMode;
             % Others? 
@@ -1348,7 +1351,8 @@ classdef sourceLocalizer
             sumEmpty = 0;
 
             thisLocalizationResults = self.sourceLocalizationResults.localizationResults;
-            lengthTs = size(thisLocalizationResults,2);
+            % lengthTs = size(thisLocalizationResults,2);
+            lengthTs = self.sourceLocalizationResults.paramStruct.originalSize; 
 
             if ~timeWindow; timeWindowSamples = lengthTs; % Samples
             else; timeWindowSamples = timeWindow * self.Fs; % Samples
@@ -1380,8 +1384,8 @@ classdef sourceLocalizer
                 vertexMap = containers.Map('keyType','double','valueType','any');
 
                 for vertIndex = uniqueVertex
-                    currentInds = find(ismember(currentVertices,vertIndex));
-                    numVertices = length(currentInds);
+                    currentInds = ismember(currentVertices,vertIndex);
+                    numVertices = sum(currentInds);
 
                     isLeft = sign(vertIndex) == -1;
 
@@ -1488,39 +1492,39 @@ classdef sourceLocalizer
 
             % This section is only needed for timeWindow ~= 0.
 
-            % maxColor = 0;
-            % for jj = 1:length(vertexMap)
-            %     if isempty(vertexMap{jj}); continue; end
-            % 
-            %     vertexMapLocal = vertexMap{jj};
-            % 
-            %     mapKeys = cell2mat(vertexMapLocal.keys);
-            %     VPerROI = cell(size(mapKeys));
-            %     valPerROI = zeros(size(mapKeys));
-            % 
-            %     for ii = 1:length(mapKeys)
-            %         roiStruct = vertexMapLocal(mapKeys(ii));
-            %         VPerROI{ii} = roiStruct.roi;
-            %         valPerROI(ii) = roiStruct.count;
-            %     end
-            %     isLeft = sign(mapKeys) == -1;
-            % 
-            %     if all(isLeft)
-            %         currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','lh');
-            %     elseif all(~isLeft)
-            %         currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','rh');
-            %     else
-            %         [isLeft,sortInds] = sort(isLeft,'descend');
-            %         VPerROI = VPerROI(sortInds);
-            %         valPerROI = valPerROI(sortInds);
-            %         rh_begin = find(~isLeft,1);
-            % 
-            %         currentMax = findMaxColor(myBp, VPerROI, valPerROI,'rh_begin',rh_begin);
-            % 
-            %     end
-            %     maxColor = max(maxColor,currentMax);
-            % end
-            % % fprintf('Max color is %.f. \n',maxColor);
+            maxColor = 0;
+            for jj = 1:length(vertexMap)
+                if isempty(vertexMap{jj}); continue; end
+
+                vertexMapLocal = vertexMap{jj};
+
+                mapKeys = cell2mat(vertexMapLocal.keys);
+                VPerROI = cell(size(mapKeys));
+                valPerROI = zeros(size(mapKeys));
+
+                for ii = 1:length(mapKeys)
+                    roiStruct = vertexMapLocal(mapKeys(ii));
+                    VPerROI{ii} = roiStruct.roi;
+                    valPerROI(ii) = roiStruct.count;
+                end
+                isLeft = sign(mapKeys) == -1;
+
+                if all(isLeft)
+                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','lh');
+                elseif all(~isLeft)
+                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'surf','rh');
+                else
+                    [isLeft,sortInds] = sort(isLeft,'descend');
+                    VPerROI = VPerROI(sortInds);
+                    valPerROI = valPerROI(sortInds);
+                    rh_begin = find(~isLeft,1);
+
+                    currentMax = findMaxColor(myBp, VPerROI, valPerROI,'rh_begin',rh_begin);
+
+                end
+                maxColor = max(maxColor,currentMax);
+            end
+            % fprintf('Max color is %.f. \n',maxColor);
 
             maxColor = self.sourceLocalizationResults.roiResults.maxValAll; 
             clim = [0 max(maxColor)];
