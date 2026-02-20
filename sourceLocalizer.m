@@ -1,4 +1,4 @@
-classdef sourceLocalizer
+classdef sourceLocalizer < handle
 
     properties
 
@@ -86,7 +86,7 @@ classdef sourceLocalizer
 
             %% Pull braindata
 
-            self = self.retrieveBraindata;
+            self.retrieveBraindata;
 
         end
 
@@ -97,10 +97,9 @@ classdef sourceLocalizer
         end
 
 
-        function [self,myBd,myBp] = retrieveBraindata(self,varargin)
+        function [myBd,myBp] = retrieveBraindata(self,varargin)
 
             %% Preamble
-
 
             p = inputParser;
             addParameter(p,'forceNew',false);
@@ -131,7 +130,6 @@ classdef sourceLocalizer
             else
 
                 fprintf('Creating braindata objects for %s.\n',self.subj);
-                % root = '/Volumes/Shares/FRNU/dataWorking/sz';
 
                 myBd = braindata2(self.subj,self.rootFolder);
                 myBp = ez_get_plotter(myBd);
@@ -142,18 +140,16 @@ classdef sourceLocalizer
                     save(fullfile(subjDir,'bdBpFull'),'myBd','myBp')
                 end
 
-
             end
 
             self.braindata.myBp = myBp;
             self.braindata.myBd = myBd;
 
-
         end
 
         %% Principal localization pipeline and helpers 
 
-        function self = localizationManager(self,varargin)
+        function localizationManager(self,varargin)
 
             p = inputParser;
             addParameter(p,'plotting',true);
@@ -163,13 +159,12 @@ classdef sourceLocalizer
             plotting = p.Results.plotting;
             forceNew = p.Results.forceNew;
 
-
-            self = self.prepareDeltaPosition('forceNew',forceNew); % Differential handling for spikes and seizures
+            self.prepareDeltaPosition('forceNew',forceNew); % Differential handling for spikes and seizures
 
             %% Onto localization
 
-            self = self.localizationFunction('forceNew',forceNew); % Spikes or seizure agnostic call
-            self = self.locDataToRoi;
+            self.localizationFunction('forceNew',forceNew); % Spikes or seizure agnostic call
+            self.locDataToRoi;
 
             %% Plot
 
@@ -180,7 +175,7 @@ classdef sourceLocalizer
 
         end
 
-        function self = prepareDeltaPosition(self,varargin)
+        function prepareDeltaPosition(self,varargin)
 
             p = inputParser;
             addParameter(p,'forceNew',false);
@@ -201,10 +196,10 @@ classdef sourceLocalizer
                         'distanceThresh', 30); % mm
 
                     % Populate spikes
-                    self = self.populateSpikes;
+                    self.populateSpikes;
 
                     % Compute sequences
-                    self = self.computeSequences;
+                    self.computeSequences;
 
                     % propagationSpeed = 300;
                     % sensorDistance = 30;
@@ -219,11 +214,11 @@ classdef sourceLocalizer
                     % these events are taken to be ~0, there's no upper limit on inter-sensor
                     % distance (as dictated by frequency).
 
-                    self = self.getSensors;
+                    self.getSensors;
 
                     %% Collect series
 
-                    self = self.spikeSequenceToDeltaPosition;
+                    self.spikeSequenceToDeltaPosition;
 
                 case 'seizure'
 
@@ -234,12 +229,12 @@ classdef sourceLocalizer
                         'subsensorLength',4,...
                         'distanceThresh', 30); % mm
 
-                    self = self.extractPhasePower;
-                    self = self.postProcessPhase;
+                    self.extractPhasePower;
+                    self.postProcessPhase;
 
-                    self = self.getSensors;
+                    self.getSensors;
 
-                    self = self.phaseToDeltaPosition;
+                    self.phaseToDeltaPosition;
 
             end
 
@@ -248,8 +243,7 @@ classdef sourceLocalizer
 
         %% Ancillary functions, for IED localization 
 
-        function self = populateSpikes(self,varargin)
-
+        function populateSpikes(self,varargin)
 
             p = inputParser;
             addParameter(p,'forceNew',false);
@@ -271,14 +265,11 @@ classdef sourceLocalizer
             fprintf('Calling spike detector with the following parameters. These are adjustable.\n');
             disp(self.spikeDetectionResults.paramStruct);
 
-
-            self = self.findSpikeTimes;
-
+            self.findSpikeTimes;
 
         end
 
-        function self = findSpikeTimes(self)
-
+        function findSpikeTimes(self)
 
             %% parse inputs
             % p = inputParser;
@@ -415,7 +406,6 @@ classdef sourceLocalizer
                             % we have spikes at the very beginning of the time series.
                             % tsBb = ts;
 
-
                             startInd = max(nIndBuffer(nFind(jj),ii) - peakWinSamples,1);
                             startBuffer = max(-(nIndBuffer(nFind(jj),ii) - peakWinSamples) + 2,1);
 
@@ -445,7 +435,6 @@ classdef sourceLocalizer
 
                 fullRaster(:,kk) = currentRaster;
 
-
             end
 
             %% Narrow by counts
@@ -462,10 +451,9 @@ classdef sourceLocalizer
             self.spikeDetectionResults.rasters = fullRaster;
             self.spikeDetectionResults.waveforms = waveformsMaster;
 
-
         end
 
-        function self = computeSequences(self,varargin)
+        function computeSequences(self,varargin)
 
             % Formerly computeSequences_includeDuplicate
 
@@ -491,7 +479,6 @@ classdef sourceLocalizer
             % = 30 / 300 mm / mm * s
             % = 0.1 s.
 
-
             seqWinSamples = ceil(self.spikeDetectionResults.paramStruct.seqWin * self.Fs);  % Samples
             overlapSamples = floor(seqWinSamples / 2);
 
@@ -508,7 +495,6 @@ classdef sourceLocalizer
             hasSeries = find(winSpkCnt >= seriesLength);
 
             % If nothing
-
 
             seriesAll = cell(max(winSpkCnt),length(hasSeries));
             seriesAll(:) = {''};
@@ -596,7 +582,6 @@ classdef sourceLocalizer
                     currentTimes(ii) = vals(ind);
                 end
 
-
                 [currentTimes,inds] = sort(currentTimes,'ascend');
                 currentLeads = currentLeads(inds);
                 currentTimes(2:end) = diff(currentTimes);
@@ -630,7 +615,7 @@ classdef sourceLocalizer
         end
 
 
-        function self = spikeSequenceToDeltaPosition(self)
+        function spikeSequenceToDeltaPosition(self)
 
             %% Preamble
 
@@ -644,13 +629,9 @@ classdef sourceLocalizer
             spkLeads = self.seqResults.seriesAll;
             spkTimes = self.seqResults.timesAll;
 
-            self = self.getSensors;
-
+            self.getSensors;
 
             %% Prepare ingredients
-
-            % sourceLoc = getSensors(sourceLoc);
-            % This should be passed in.
 
             sensorInds = self.sensors.sensorInds;
             sensorFlip = [sensorInds; fliplr(sensorInds)];
@@ -674,7 +655,6 @@ classdef sourceLocalizer
                     currentTimes(ii) = sum(currentTimes(ii - 1:ii));
                 end
 
-
                 [~,leadIndices] = ismember(currentSeries,self.chanNames);
                 pairIndices = nchoosek(1:length(currentSeries),2);
 
@@ -691,7 +671,6 @@ classdef sourceLocalizer
                 %         pairHits(leadPairs(ii,1),leadPairs(ii,2)) = pairHits(leadPairs(ii,1),leadPairs(ii,2)) + 1;
                 %     end
 
-
                 b(b > size(sensorInds,1)) = b(b > size(sensorInds,1)) - size(sensorInds,1);
                 b = b(a);
 
@@ -706,7 +685,6 @@ classdef sourceLocalizer
 
                 diffTimes = diffTimes(belowInterval);
                 b = b(belowInterval);
-
 
                 seriesTable(b,jj) = diffTimes; % Samples
                 % Lead 1 time - lead 2 time
@@ -723,7 +701,6 @@ classdef sourceLocalizer
             % structKey(all(isnan(seriesTable))) = [];
 
             seriesTable(:,all(isnan(seriesTable))) = [];
-
 
             %% Pack up
 
@@ -742,8 +719,7 @@ classdef sourceLocalizer
 
         %% Ancillary functions for seizure localization
 
-
-        function self = extractPhasePower(self)
+        function extractPhasePower(self)
 
             assert(exist('seizureWindowFilt','file'),'This file should exist in diamondToolbox/commonFiles/Filt. Please check paths.');
 
@@ -769,11 +745,9 @@ classdef sourceLocalizer
             self.seizureProcessingResults.freq = freqData;
             self.seizureProcessingResults.real = realData;
 
-
         end
 
-        function self = postProcessPhase(self)
-
+        function postProcessPhase(self)
 
             %%%%%%
             % Now post-process this data in such a way as to only pick the good data
@@ -807,8 +781,7 @@ classdef sourceLocalizer
 
         end
 
-        function self = phaseToDeltaPosition(self)
-
+        function phaseToDeltaPosition(self)
 
             %% Preamble
 
@@ -849,7 +822,6 @@ classdef sourceLocalizer
                 currentFreq = freqMean(validInds);
                 currentFreq = repmat(currentFreq,1,2);
 
-
                 % currentPhase = unwrap(currentPhase,[],2);
                 % Correct, but slower
 
@@ -860,6 +832,7 @@ classdef sourceLocalizer
                 end
 
                 currentPhase = currentPhase - mean(currentPhase,2);
+                % Center around 0 
 
                 deltaPositionLocal(ii,validInds) = -(currentPhase(:,1) * propagationSpeed ./ (2 * pi * currentFreq(:,1)) ...
                     - currentPhase(:,2) * propagationSpeed ./ (2 * pi * currentFreq(:,2)));
@@ -871,13 +844,14 @@ classdef sourceLocalizer
             self.deltaPosition = deltaPositionLocal;
 
             fprintf('Finished computing deltaPosition, for seizure, subject %s. \n%.f percent of all computed phase differences used. \n',self.subj, sum(~isnan(deltaPositionLocal(:))) / numel(deltaPositionLocal) * 100);
+
         end
 
         %% Generic (spike or seizure) functions for setting up brain anatomy and electrode utilization
 
-        function self = getSensors(self)
+        function getSensors(self)
 
-            self = self.loadGeodesic;
+            self.loadGeodesic;
             sensorDistance = self.sourceLocalizationResults.paramStruct.sensorDistance;
 
             geodesicDistancesMaster = self.geodesic.geodesicDistances;
@@ -903,8 +877,6 @@ classdef sourceLocalizer
 
             sensorsMaster = sensorsMaster(ii < jj,:);
 
-
-
             sensorStruct.sensorInds = sensorsMaster;
             sensorStruct.distancesMaster = distancesMaster;
             sensorStruct.sensorDistance = sensorDistance; % Can still save this on the way out
@@ -913,7 +885,7 @@ classdef sourceLocalizer
 
         end
 
-        function self = loadGeodesic(self,varargin)
+        function loadGeodesic(self,varargin)
 
             %% Preamble
 
@@ -933,7 +905,6 @@ classdef sourceLocalizer
 
             geodesicMaster = self.collectGeodesicDistances_master('saving',saving);
 
-
             %% Modify
 
             if unModified
@@ -942,7 +913,6 @@ classdef sourceLocalizer
             end
 
             %% Unpack
-
 
             [chanLog,chanInds] = ismember(self.chanNames,geodesicMaster.leadNames);
             % missingLeads = setdiff(chanNames,leadsFromGeodesic);
@@ -1026,7 +996,7 @@ classdef sourceLocalizer
 
             tic
 
-            [self, myBd, myBp] = self.retrieveBraindata;
+            [myBd, myBp] = self.retrieveBraindata;
 
             fprintf('Building geodesic distances for %s. \n',self.subj);
 
@@ -1041,7 +1011,6 @@ classdef sourceLocalizer
             t = readtable(leadsDir);
 
             isLeftInds = t.x < 0;
-
 
             leadLocations = table2array(t(:,{'x','y','z'}));
             leadNames = t.chanName;
@@ -1107,13 +1076,12 @@ classdef sourceLocalizer
 
             if saving; save(fn,'geodesicMaster'); end
 
-
         end
 
         %% The actual localization function 
         % The workhorse 
 
-        function self = localizationFunction(self,varargin)
+        function localizationFunction(self,varargin)
 
             p = inputParser;
             addParameter(p,'forceNew',false);
@@ -1136,7 +1104,7 @@ classdef sourceLocalizer
 
             myBp = self.braindata.myBp;
 
-            self = self.loadGeodesic;
+            self.loadGeodesic;
 
             geodesicDistancesMaster = self.geodesic.geodesicDistances;
 
@@ -1179,8 +1147,6 @@ classdef sourceLocalizer
 
             end
 
-
-
             %% Localization
 
             localizationResults = nan(3,lengthData);
@@ -1207,7 +1173,6 @@ classdef sourceLocalizer
                 if length(currentSubsensor) < subsensorLength; continue; end
                 %%%%
 
-
                 isLeftSubsensor = isLeftSensors(currentSubsensor);
                 useLeft = round(sum(isLeftSubsensor) / length(isLeftSubsensor));
 
@@ -1219,13 +1184,11 @@ classdef sourceLocalizer
 
                 drSubsensor = deltaPositionLocal(currentSubsensor,jj);
 
-
                 % eligiblePoints = logical(sum(boundsMaster(currentSubsensor,:)));
                 eligiblePoints = sum(boundsMaster(currentSubsensor,:)) >= 1; % Union of all source spaces
                 % This enforces the requirement that the chosen point at least
                 % distanceThresh from at least ONE electrode pair.
                 eligiblePointsIndex = find(eligiblePoints);
-
 
                 % Which hemisphere are we on?
                 if isLeftSensors(currentSubsensor(1)); eligiblePoints = lVertices(eligiblePoints,:);
@@ -1287,7 +1250,6 @@ classdef sourceLocalizer
                 isLeft = isLeftSensors(currentSubsensor(1));
                 if isLeft; ind = ind * -1; end
 
-
                 locTemp(1) = ind;
                 locTemp(2) = minVal;
                 locTemp(3) = jj;
@@ -1298,8 +1260,6 @@ classdef sourceLocalizer
 
             fprintf('Localization completed in %.2f seconds. \n',toc);
             fprintf('%.f percent of samples gave rise to a localization, for a total of %d localized points. \n',sum(~isnan(localizationResults(2,:))) / lengthData * 100,sum(~isnan(localizationResults(2,:))));
-
-
 
             %% Quality control?
 
@@ -1319,19 +1279,17 @@ classdef sourceLocalizer
 
             self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
 
-
             self.sourceLocalizationResults.paramStruct.originalSize = lengthData; 
 
             self.sourceLocalizationResults.paramStruct.meta.subj = self.subj; 
             self.sourceLocalizationResults.paramStruct.meta.localizationMode = self.localizationMode;
             % Others? 
 
-
         end
 
         %% Plotting or post-localization analysis 
 
-        function self = locDataToRoi(self,varargin)
+        function locDataToRoi(self,varargin)
 
             p = inputParser;
             addParameter(p,'forceNew',false);
@@ -1352,9 +1310,9 @@ classdef sourceLocalizer
                 fprintf('%s\n\n', repmat('%', 1, 70));
             end
 
-            self = self.localizationFunction; % Needs to be done; no need to pass forceNew;
+            self.localizationFunction; % Needs to be done; no need to pass forceNew;
 
-            [self, myBd] = self.retrieveBraindata;
+            myBd = self.retrieveBraindata;
 
             roiRadius = Inf;
             sumEmpty = 0;
@@ -1366,7 +1324,6 @@ classdef sourceLocalizer
 
             if ~timeWindow
                 timeWindowSamples = lengthTs; % Samples
-
             else; timeWindowSamples = timeWindow * self.Fs; % Samples
             end
             % Set timeWindow to lengthTs if 0, so that this just creates a
@@ -1450,13 +1407,12 @@ classdef sourceLocalizer
 
         end
 
-        function self = plotSurfFun(self)
+        function plotSurfFun(self)
 
             % p = inputParser;
             % addParameter(p,'timeWindow',0);
             % parse(p,varargin{:})
             % timeWindow = p.Results.timeWindow;
-
 
             %% Preamble
 
@@ -1466,7 +1422,7 @@ classdef sourceLocalizer
             % For seizure source info
             %%%%
 
-            [self, myBd, myBp] = self.retrieveBraindata;
+            [myBd, myBp] = self.retrieveBraindata;
 
             isLeftInds = self.geodesic.isLeftInds;
             useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
@@ -1490,7 +1446,7 @@ classdef sourceLocalizer
             %%  Grab and set up ROI results
 
             assert(~isempty(self.sourceLocalizationResults.localizationResults),'No data to plot.');
-            self = self.locDataToRoi;
+            self.locDataToRoi;
             roiResults = self.sourceLocalizationResults.roiResults;
             vertexMap = roiResults.vertexMap;
             % clim = roiResults.clim;
@@ -1517,7 +1473,6 @@ classdef sourceLocalizer
                         VPerROI{ii} = roiStruct.roi;
                         valPerROI(ii) = roiStruct.count;
                     end
-
 
                     isLeft = sign(mapKeys) == -1;
 
@@ -1546,16 +1501,14 @@ classdef sourceLocalizer
                 drawnow
             end
 
-
         end
 
-        function self = plotDimensionsReducedWrapper(self,varargin)
+        function plotDimensionsReducedWrapper(self,varargin)
 
             p = inputParser;
             addParameter(p,'colorMode','auto'); % timing; heatmap
             parse(p,varargin{:})
             colorMode = p.Results.colorMode;
-
 
             figure
 
@@ -1566,13 +1519,13 @@ classdef sourceLocalizer
             for ii = 1:length(useMatrices)
 
                 subplot(1,length(useMatrices),ii) 
-                self = self.plotDimensionReduced('coeff',useMatrices{ii},'colorMode',colorMode);
+                self.plotDimensionReduced('coeff',useMatrices{ii},'colorMode',colorMode);
 
             end
 
         end
 
-        function self = plotDimensionReduced(self,varargin)
+        function plotDimensionReduced(self,varargin)
 
             p = inputParser;
             addParameter(p,'colorMode','auto'); % timing; heatmap 
@@ -1581,10 +1534,9 @@ classdef sourceLocalizer
             colorMode = p.Results.colorMode;
             coeff = p.Results.coeff; 
 
-
             %% Preamble
 
-            [self, ~, myBp] = self.retrieveBraindata; 
+            [~, myBp] = self.retrieveBraindata; 
 
             currentVertices = self.sourceLocalizationResults.localizationResults(1,:);
             locationsMaster = self.convertVerticesToLocations(myBp, currentVertices);
@@ -1636,11 +1588,14 @@ classdef sourceLocalizer
                     case 'spikes'; colorMode = 'heatmap'; 
                     case 'seizure'; colorMode = 'timing'; 
                 end
-            elseif isequal(colorMode,'timing')
-                if isequal(locMode,'spikes'); warning('Spike localization results will be colored according to timing, but timing is probably meaningless.'); 
-                elseif isequal(locMode,'seizure'); fprintf('Hint: try passing ''colorMode'',''heatmap'' to view results in terms of localization density, rather than in terms of timing.'); 
+                if isequal(locMode,'seizure')
+                    fprintf('\n%s\n', repmat('%', 1, 70));
+                    fprintf('HINT: Try passing ''colorMode'',''heatmap'' to view results in\n');
+                    fprintf('terms of localization density, rather than in terms of timing.\n');
+                    fprintf('%s\n\n', repmat('%', 1, 70));
                 end
-                % timing mode intended for seizures. 
+            elseif isequal(colorMode,'timing')
+                if isequal(locMode,'spikes'); warning('Spike localization results will be colored according to timing, but timing is probably meaningless, since you''re considering IED localization.'); end                % timing mode intended for seizures. 
             end
 
             switch colorMode
@@ -1692,24 +1647,19 @@ classdef sourceLocalizer
             % set(gca,'PlotBoxAspectRatio',[3 4 4])
             box on
 
-
             xticks(xlim); yticks(ylim);
             % xticklabels([d0(1,1) d1(1,1)]);
             % yticklabels([d0(2,1) d1(2,1)]);
             xticklabels({sprintf('%s',d0{1,1}), sprintf('%s',d1{1,1})});
             yticklabels({sprintf('%s',d0{2,1}), sprintf('%s',d1{2,1})});
 
-
         end
-
-
 
     end
 
     methods (Static = true)
 
         function [spkLeads,spkTimes] = removeDuplicates(spkLeads,spkTimes)
-
 
             seriesMap = containers.Map('keyType','char','valueType','any');
             for jj = 1:size(spkTimes,2)
@@ -1770,7 +1720,6 @@ classdef sourceLocalizer
 
             if sum(rasters(:)) == 0; return; end
 
-
             volCondInds = find(sum(rasters,2) >= 2);
             if isempty(volCondInds); return; end
             fprintf('%.2f%% of single spike samples contained duplicate spikes and were removed on account of possible volume conduction.\n',full(length(volCondInds) / sum(any(rasters,2)) * 100));
@@ -1813,11 +1762,8 @@ classdef sourceLocalizer
 
             %% Preamble
 
-
             lVertices = myBp.surfaces.pial_lh.vertices;
             rVertices = myBp.surfaces.pial_rh.vertices;
-
-
 
             %% Let's distribute our data into a master map.
 
@@ -1838,7 +1784,6 @@ classdef sourceLocalizer
 
         function [d1, d0] = coeffToOrientation(coeff)
 
-
             % Orientation is RAS
             oPos = {'Right','Anterior','Superior'};
             oNeg = {'Left','Posterior','Inferior'};
@@ -1858,27 +1803,18 @@ classdef sourceLocalizer
 
                 posInds = sign(orientationPC(ii,inds)) == 1;
 
-
                 d1(ii, posInds) = oPos(inds(posInds));
                 d1(ii, ~posInds) = oNeg(inds(~posInds));
 
                 d0(ii, posInds) = oNeg(inds(posInds));
                 d0(ii, ~posInds) = oPos(inds(~posInds));
 
-
-
             end
-
 
             % Each ROW of d provides the biggest, medium, and smallest influence of the
             % initial dimensions, into that row.
 
-
-
         end
-
-
-
 
     end
 
