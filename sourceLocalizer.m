@@ -7,6 +7,8 @@ classdef sourceLocalizer < handle
         chanNames
         Fs
 
+        electrodeLocalizer
+
         braindata = struct('myBd',[],'myBp',[]);
 
         spikeDetectionResults = struct('rasters',[],'waveforms',[],'paramStruct',struct())
@@ -17,18 +19,6 @@ classdef sourceLocalizer < handle
 
         sourceLocalizationResults = struct('localizationResults',[],'roiResults',[],'paramStruct',struct());
         localizationMode = 'spikes'; % or seizures
-
-
-        % These are defaults and can be adjusted.
-        % propagationSpeed is in mm/s and refers to speed of wave
-        % propagation.
-
-        % sensorDistance is in mm. This is the distance sensors are apart
-        % from each other.
-
-        % subsensorLength = 3;
-        % How many electrodes at a time (at minimum) should participate in
-        % source localization.
 
         deltaPosition
 
@@ -55,39 +45,82 @@ classdef sourceLocalizer < handle
 
         %% Setup functions 
 
-        function self = sourceLocalizer(subj,rootFolder,timeSeries,chanNames,Fs)
+        function self = sourceLocalizer(subj, rootFolder, varargin)
 
             % Inputs:
-            %   subj -- Subject name, e.g. NIH032, subj12
-            %   rootFolder -- root folder name.
+            %   subj       - Subject name, e.g. 'NIH032'
+            %   rootFolder - Path to root data folder.
             %       Expected folder structure:
             %           rootFolder/
-            %               <subj>/           – e.g. NIH032, NIH034
-            %                   tal/          – output of the localization process
-            %                   <data files>  – time series data can live here too
-            %   timeSeries    – n x m array (n samples, m channels)
-            %   chanNames     – m x 1 cell array of channel name strings
-            %   Fs            – sampling rate (Hz)
+            %               <subj>/
+            %                   tal/
+            %
+            % Optional positional:
+            %   chanNames  - m x 1 cell array of channel name strings.
+            %                If not provided, a file dialog will prompt to
+            %                load from a .mat or .csv file. Dismiss the
+            %                dialog to leave chanNames empty (no dropdown
+            %                in the electrode naming GUI).
+            %
+            % Optional name-value:
+            %   forceNewElectrodeLocalizer - If true, re-run electrode
+            %       localization even if tal/leads.csv already exists.
+            %       Default: false.
             %
             % Note:
-            %   You can build a wrapper that takes a subject name, loads the
-            %   relevant timeSeries, chanNames, and Fs, and passes them to sourceLocalizer.
+            %   timeSeries and Fs are NOT constructor arguments. Assign
+            %   them after construction:
+            %       sl.timeSeries = myData;   % [samples x channels]
+            %       sl.Fs         = 1000;     % Hz
+            %   Then call sl.localizationManager().
 
-            [~,currentPath] = fileparts(pwd);
-            assert(isequal(currentPath,'diamondToolbox'),'Please change directory to diamondToolbox.');
+            p = inputParser;
+            addOptional(p, 'chanNames', {});
+            addParameter(p, 'forceNewElecLoc', false);
+            parse(p, varargin{:});
+            chanNames              = p.Results.chanNames;
+            forceNewElecLoc        = p.Results.forceNewElecLoc;
+
+            [~, currentPath] = fileparts(pwd);
+            assert(isequal(currentPath, 'diamondToolbox'), ...
+                'Please change directory to diamondToolbox.');
             addpath(genpath(pwd));
 
-            self.subj = subj;
+            self.subj       = subj;
             self.rootFolder = rootFolder;
 
-            self.timeSeries = timeSeries;
+            %% Resolve chanNames
+            if isempty(chanNames)
+                chanNames = sourceLocalizer.loadChanNamesFromFile();
+            end
             self.chanNames = chanNames;
-            self.Fs = Fs;
+
+            %% Electrode localization
+
+            self.electrodeLocalizer = electrodeLocalizer( ...
+                subj, rootFolder, chanNames, 'forceNew', forceNewElecLoc);
 
             %% Pull braindata
-
             self.retrieveBraindata;
 
+        end
+
+        %% Property setters
+
+        function set.timeSeries(self, val)
+            if ~isempty(self.chanNames)
+                assert(size(val, 2) == length(self.chanNames), ...
+                    ['timeSeries must have %d columns (one per channel ' ...
+                     'in chanNames), got %d.'], ...
+                    length(self.chanNames), size(val, 2));
+            end
+            self.timeSeries = val;
+        end
+
+        function set.Fs(self, val)
+            assert(isnumeric(val) && isscalar(val) && val > 0, ...
+                'Fs must be a positive scalar.');
+            self.Fs = val;
         end
 
         function subjFolder = get.subjFolder(self)
@@ -151,10 +184,16 @@ classdef sourceLocalizer < handle
 
         function localizationManager(self,varargin)
 
+            assert(~isempty(self.timeSeries), ...
+                ['timeSeries must be set before running localizationManager. ' ...
+                 'Assign it as: sl.timeSeries = yourData;']);
+            assert(~isempty(self.Fs), ...
+                ['Fs must be set before running localizationManager. ' ...
+                 'Assign it as: sl.Fs = yourFs;']);
+
             p = inputParser;
             addParameter(p,'plotting',true);
             addParameter(p,'forceNew',false);
-            parse(p,varargin{:})
             parse(p,varargin{:})
             plotting = p.Results.plotting;
             forceNew = p.Results.forceNew;
@@ -195,16 +234,19 @@ classdef sourceLocalizer < handle
                         'subsensorLength',3,...
                         'distanceThresh', 30); % mm
 
-                    % Populate spikes
-                    self.populateSpikes;
+                    % These are defaults and can be adjusted.
+                    % propagationSpeed is in mm/s and refers to speed of wave
+                    % propagation.
 
-                    % Compute sequences
-                    self.computeSequences;
+                    % sensorDistance is in mm. This is the distance sensors are apart
+                    % from each other.
 
-                    % propagationSpeed = 300;
-                    % sensorDistance = 30;
+                    % subsensorLength = 3;
+                    % How many electrodes at a time (at minimum) should participate in
+                    % source localization.
 
-                    % Here, sensorDistance can basically be as far apart as we'd like, barring
+                    % Here, since we're doing localization wtih spikes, 
+                    % sensorDistance can basically be as far apart as we'd like, barring
                     % concerns for the distance at which the signal can travel.
                     % We do NOT have aliasing concerns like we did previously.
                     % Before, a large sensorDistance meant that we required very low
@@ -213,6 +255,12 @@ classdef sourceLocalizer < handle
                     % they arrive rarely, and so aliasing is not an issue. Since frequency of
                     % these events are taken to be ~0, there's no upper limit on inter-sensor
                     % distance (as dictated by frequency).
+
+                    % Populate spikes
+                    self.populateSpikes;
+
+                    % Compute sequences
+                    self.computeSequences;
 
                     self.getSensors;
 
@@ -1814,6 +1862,68 @@ classdef sourceLocalizer < handle
             % Each ROW of d provides the biggest, medium, and smallest influence of the
             % initial dimensions, into that row.
 
+        end
+
+    end
+
+    methods (Static)
+
+        function chanNames = loadChanNamesFromFile()
+            % Prompt the user to select a .mat or .csv file containing
+            % channel names. Returns a column cell array of strings, or {}
+            % if the dialog is dismissed.
+
+            chanNames = {};
+
+            fprintf('Select a .mat or .csv file containing channel names.\n');
+            fprintf('Cancel the dialog to proceed without channel names.\n');
+            [fname, fpath] = uigetfile( ...
+                {'*.mat;*.csv', 'Channel names file (*.mat, *.csv)'}, ...
+                'Select channel names file (cancel to skip)');
+
+            if isequal(fname, 0)
+                fprintf('No channel names file selected. chanNames will be empty.\n');
+                return;
+            end
+
+            fullPath = fullfile(fpath, fname);
+            [~, ~, ext] = fileparts(fname);
+
+            if strcmpi(ext, '.mat')
+                S = load(fullPath);
+                fields = fieldnames(S);
+                if isscalar(fields)
+                    chanNames = S.(fields{1});
+                else
+                    [idx, ok] = listdlg( ...
+                        'ListString',   fields, ...
+                        'SelectionMode','single', ...
+                        'PromptString', 'Select variable containing channel names:');
+                    if ok
+                        chanNames = S.(fields{idx});
+                    else
+                        fprintf('No variable selected. chanNames will be empty.\n');
+                        return;
+                    end
+                end
+
+            elseif strcmpi(ext, '.csv')
+                T = readtable(fullPath, 'ReadVariableNames', false);
+                chanNames = T{:, 1};
+            else
+                error('Unsupported file type: %s. Use .mat or .csv.', ext);
+            end
+
+            % Normalise to column cell array of char
+            if isstring(chanNames)
+                chanNames = cellstr(chanNames);
+            elseif isnumeric(chanNames)
+                chanNames = arrayfun(@num2str, chanNames, 'UniformOutput', false);
+            end
+            if ~iscell(chanNames)
+                chanNames = cellstr(chanNames);
+            end
+            chanNames = chanNames(:);
         end
 
     end

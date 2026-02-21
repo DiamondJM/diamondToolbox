@@ -84,6 +84,7 @@ function localizer_run_template(subj, rootDir, hemisphere)
     pial_surf = gifti(pial_filename);
     
     %% anchors
+    
     if ~exist(fullfile(locDirs.anchors, 'anchors.csv'), 'file')
         anchor_table = anchor(fullfile(locDirs.fs, subj), fullfile(locDirs.mr_pre,'mr_pre.nii'), locDirs.anchors,'slicer_binary',SLICER_BINARY,'postprocess_only',0);
         writetable(anchor_table, fullfile(locDirs.anchors, 'anchors.csv')); 

@@ -1,5 +1,5 @@
 ================================================================================
-                           sourceLocalizer — README
+                         diamondToolbox — README
 ================================================================================
 
 Diamond JM et al., "Travelling waves reveal a dynamic seizure source in human
@@ -12,17 +12,29 @@ waves arising from an epileptogenic source," Brain, 2023.
 OVERVIEW
 --------------------------------------------------------------------------------
 
-sourceLocalizer is a MATLAB class for localizing the cortical source of
-epileptiform activity — either seizure (ictal) discharges or interictal
-epileptiform discharges (IEDs) — from intracranial EEG (iEEG) recordings.
+diamondToolbox provides two MATLAB classes that together cover the full
+pipeline from raw imaging data to cortical source localization of epileptiform
+activity:
 
-The core hypothesis is that both ictal and interictal discharges represent
-travelling waves propagated outward from a relatively focal cortical source.
-Rather than treating the electrode with the earliest discharge as the source
-(a common clinical heuristic), this toolbox uses time or phase differences of
-arrival across nearby electrode pairs to triangulate the source location on the
-cortical surface. This approach is analogous to multilateration methods used in
-acoustics, radar, and earthquake epicenter detection.
+  electrodeLocalizer  — Starting from a pre-operative MRI and post-operative
+                        CT, reconstructs the cortical surface and localizes
+                        implanted electrodes, producing the files that
+                        sourceLocalizer requires.
+
+  sourceLocalizer     — Localizes the cortical source of epileptiform activity
+                        (seizure or interictal discharges) from intracranial
+                        EEG (iEEG) recordings. Uses travelling-wave
+                        multilateration across electrode pairs to triangulate
+                        the source on the cortical surface.
+
+The core hypothesis of sourceLocalizer is that both ictal and interictal
+discharges represent travelling waves propagated outward from a relatively
+focal cortical source. Rather than treating the electrode with the earliest
+discharge as the source (a common clinical heuristic), this toolbox uses time
+or phase differences of arrival across nearby electrode pairs to triangulate
+the source location on the cortical surface. This approach is analogous to
+multilateration methods used in acoustics, radar, and earthquake epicenter
+detection.
 
 Localization does not require that any electrode be implanted directly at the
 source — the source can be inferred from surrounding electrodes that receive
@@ -32,79 +44,225 @@ the travelling wave.
 REQUIREMENTS
 --------------------------------------------------------------------------------
 
-- MATLAB (with the Signal Processing Toolbox for filtfilt, hilbert, findpeaks,
-  buffer, medfilt1)
+All users
+---------
+- MATLAB with:
+    Signal Processing Toolbox  (filtfilt, hilbert, findpeaks, buffer, medfilt1)
+    Image Processing Toolbox   (bwconncomp, regionprops3 — for electrodeLocalizer)
 - diamondToolbox (this repository), added to the MATLAB path via
   addpath(genpath(pwd)) from the diamondToolbox root directory
-- braindata2 and brainplotter objects (can be created with diamondToolbox), which
-  handle cortical surface meshes and cortical surface reconstruction plotting
-- A subject folder with the following expected structure:
+- braindata2 and brainplotter objects (bundled in this repository)
+
+For electrodeLocalizer (electrode localization from imaging)
+------------------------------------------------------------
+- FreeSurfer  — cortical surface reconstruction (recon-all)
+                https://surfer.nmr.mgh.harvard.edu
+- AFNI/SUMA   — standard surface mesh generation (@SUMA_Make_Spec_FS)
+                https://afni.nimh.nih.gov
+- SPM         — CT-to-MR coregistration (spm_coreg); must be on MATLAB path
+                https://www.fil.ion.ucl.ac.uk/spm/
+- gifti toolbox — bundled in Utilities/eeg_toolbox/localize/zLocalize/packages/
+
+Note: FreeSurfer and AFNI are invoked automatically from within MATLAB via
+system calls. The user does not need to leave MATLAB at any point. FreeSurfer
+surface reconstruction (recon-all) takes approximately 6–10 hours and runs
+unattended. Binary paths for FreeSurfer and AFNI can be configured via
+constructor arguments (see electrodeLocalizer section below).
+
+Users with existing localization files
+--------------------------------------
+If leads.csv and gifti surface files already exist from a prior localization
+(e.g. from another pipeline or a different machine), electrodeLocalizer can
+import them directly without running the imaging pipeline. See
+IMPORTING EXISTING FILES below.
+
+--------------------------------------------------------------------------------
+FOLDER STRUCTURE
+--------------------------------------------------------------------------------
 
       rootFolder/
           <subj>/
               tal/
-                  leads.csv        — electrode localization file (see below)
-              brainData_<subj>.mat — cached braindata objects (auto-created)
-              geodesic_<subj>.mat  — cached geodesic distances (auto-created)
+                  leads.csv              — electrode positions (auto-created or
+                                           imported; see below)
+                  zloc/                  — electrodeLocalizer working directory
+                      mr_pre/
+                          mr_pre.nii     — pre-op T1 MRI nifti
+                      CT_1/
+                          ct_implant.nii — post-op CT nifti
+                      freesurfer/
+                          <subj>/
+                              surf/      — FreeSurfer surface files
+                              SUMA/      — gifti surface files (standard ld141 mesh)
+              brainData_<subj>.mat       — cached braindata objects (auto-created)
+              geodesic_<subj>.mat        — cached geodesic distances (auto-created)
 
-- leads.csv must contain columns: chanName, x, y, z
-  (electrode name and RAS coordinates in mm)
+leads.csv must contain columns: chanName, x, y, z
+(electrode name and RAS coordinates in mm).
 
 --------------------------------------------------------------------------------
 QUICK START
 --------------------------------------------------------------------------------
 
-1. Navigate to the diamondToolbox root directory in MATLAB.
+Step 1 — Navigate to the diamondToolbox root directory in MATLAB:
 
-2. Construct a sourceLocalizer object:
+      cd /path/to/diamondToolbox
+      % (the constructor enforces this)
 
-      sl = sourceLocalizer(subj, rootFolder, timeSeries, chanNames, Fs);
+Step 2 — Construct a sourceLocalizer object:
+
+      sl = sourceLocalizer(subj, rootFolder);
 
    Inputs:
       subj        — Subject identifier string, e.g. 'NIH032'
       rootFolder  — Path to the root data folder (see folder structure above)
-      timeSeries  — [n x m] numeric array; n samples, m channels
-      chanNames   — [m x 1] cell array of electrode name strings, 
-                    where the elements of chanNames correspond to the columns of timeSeries
-      Fs          — Sampling rate in Hz
 
+   Optional positional argument:
+      chanNames   — [m x 1] cell array of electrode name strings.
+                    If omitted, a file dialog prompts for a .mat or .csv file
+                    containing the channel list. Dismiss the dialog to proceed
+                    without channel names (no dropdown in the naming GUI).
 
-   On construction, the object loads or creates braindata objects (myBd,
-   myBp) for the subject, which contain the cortical surface mesh and
-   associated utilities. These are cached to disk for reuse.
+   Optional name-value argument:
+      'forceNewElectrodeLocalizer', true  — re-run electrode localization even
+                                            if tal/leads.csv already exists.
 
-   Note: the chanNames column in leads.csv does not need to match chanNames. 
-   leads.csv should contain every element of chanNames, but can additionally 
-   contain extra elements. If there are elements of chanNames not present in 
-   leads.csv, a warning will be thrown, and the missing channels cannot 
-   participate in localization, but the code should proceed. 
+   On construction, sourceLocalizer automatically creates an electrodeLocalizer
+   object (sl.electrodeLocalizer). If tal/leads.csv and the required surface
+   files are already present, electrodeLocalizer returns immediately. Otherwise
+   it prompts to either run the full imaging pipeline or import existing files.
 
-   Critically, however, there should be consistency in channel naming between 
-   chanNames and leads.csv. For instance, for some channel chanX, the time series 
-   of chanX given in timeSeries must have been recorded at the location of chanX
-   given in leads.csv. 
+   After construction, assign timeSeries and Fs before running analysis:
 
-3. Set the localization mode (default is 'spikes'):
+      sl.timeSeries = myData;   % [samples x channels] numeric array
+      sl.Fs         = 1000;     % sampling rate in Hz
 
-      sl.localizationMode = 'spikes';    % for interictal discharge localization
-      sl.localizationMode = 'seizure';   % for ictal discharge localization
+   Note: the channel names in leads.csv do not need to exactly match chanNames.
+   leads.csv may contain additional channels beyond those in chanNames. If any
+   element of chanNames is absent from leads.csv, a warning is thrown and that
+   channel cannot participate in localization. Name correspondence between
+   chanNames and leads.csv is critical — the time series column for a given
+   channel must correspond to the position listed for that channel in leads.csv.
 
-4. Run the full localization pipeline:
+Step 3 — Set the localization mode (default is 'spikes'):
 
-      sl = sl.localizationManager();
+      sl.localizationMode = 'spikes';    % interictal discharge localization
+      sl.localizationMode = 'seizure';   % ictal discharge localization
+
+Step 4 — Run the full source localization pipeline:
+
+      sl.localizationManager();
 
    This executes spike detection or seizure phase extraction, computes time or
    phase differences across sensor pairs, runs the geometric source
    localization, maps results to anatomical regions of interest, and produces
    summary plots.
 
-5. Optional arguments for localizationManager:
+Step 5 — Optional arguments for localizationManager:
 
-      sl = sl.localizationManager('plotting', false);  % suppress plots
-      sl = sl.localizationManager('forceNew', true);   % ignore cached results
+      sl.localizationManager('plotting', false);  % suppress plots
+      sl.localizationManager('forceNew', true);   % ignore cached results
 
 --------------------------------------------------------------------------------
-KEY PARAMETERS
+ELECTRODE LOCALIZATION  (electrodeLocalizer)
+--------------------------------------------------------------------------------
+
+electrodeLocalizer is constructed automatically inside the sourceLocalizer
+constructor. It checks whether localization output files already exist and,
+if not, either runs the pipeline or imports existing files.
+
+Pipeline stages
+---------------
+Each stage checks for its own output files before running, so the pipeline
+is safe to interrupt and resume.
+
+  Stage 1  setupDirectories    Create zloc/ folder structure under tal/
+  Stage 2  getInputFiles       File dialogs for mr_pre.nii and ct_implant.nii;
+                               copies selected files to expected locations
+  Stage 3  runSurface          FreeSurfer recon-all surface reconstruction
+                               + pial-outer-smoothed cortical envelope
+                               (~6–10 hours, runs unattended)
+  Stage 4  runSuma             AFNI/SUMA standard ld141 mesh → gifti files
+                               (198,812 vertices per hemisphere)
+  Stage 5  coregisterCT        SPM rigid-body CT-to-MR coregistration via
+                               normalised mutual information (spm_coreg)
+  Stage 6  detectElectrodes    Threshold CT volume + connected-component
+                               analysis to find electrode clusters; centroids
+                               converted to MRI RAS mm coordinates
+  Stage 7  namingGUI           Interactive 3-D figure: detected clusters
+                               displayed on pial surface; user names each
+                               contact, labels it depth or subdural, or marks
+                               it as artifact. If chanNames was provided, a
+                               dropdown of remaining channel names is offered.
+  Stage 8  projectElectrodes   Subdural contacts snapped to nearest vertex on
+                               the pial-outer-smoothed surface (brain-shift
+                               correction). Depth contacts retain their
+                               CT-derived MR-space coordinates.
+  Stage 9  writeLeads          Writes tal/leads.csv (chanName, x, y, z)
+
+Configuring binary paths
+------------------------
+FreeSurfer and AFNI binary directories default to common install locations.
+Override them via constructor arguments:
+
+      sl = sourceLocalizer(subj, rootFolder, chanNames, ...
+              'freesurfer_bin', '/path/to/freesurfer/bin', ...
+              'afni_bin',       '/path/to/abin');
+
+   Note: these arguments are forwarded to electrodeLocalizer internally.
+
+Checking prerequisites
+----------------------
+Run a prerequisites check at any time to see what is installed and what is
+still required for stages that have not yet completed:
+
+      sl.electrodeLocalizer.checkPrerequisites()
+
+Re-running the pipeline
+-----------------------
+      sl.electrodeLocalizer.run('forceNew', true)
+
+      % Or re-run a specific stage, e.g.:
+      sl.electrodeLocalizer.runSurface('forceNew', true)
+
+--------------------------------------------------------------------------------
+IMPORTING EXISTING FILES
+--------------------------------------------------------------------------------
+
+If leads.csv and gifti surface files already exist from a prior localization
+pipeline, they can be imported directly without running the imaging pipeline.
+
+During construction, if required files are missing, a dialog offers:
+  [Run Pipeline]         Run the full electrodeLocalizer pipeline
+  [Import Existing Files] Point to existing leads.csv and/or surfaces
+  [Cancel]
+
+Import can also be called at any time independently:
+
+      sl.electrodeLocalizer.importExistingLocalization()
+
+This opens file dialogs for each missing file independently. Dismissing a
+dialog skips that file, so partial imports are valid (e.g. import surfaces
+now and leads.csv later).
+
+Files that can be imported
+--------------------------
+  leads.csv                    — required; must have columns chanName, x, y, z
+  lh.pial-outer-smoothed.gii  — required for electrode projection
+  rh.pial-outer-smoothed.gii  — required for electrode projection
+  lh.pial.gii                 — used for electrode naming GUI display
+  rh.pial.gii                 — used for electrode naming GUI display
+
+All gifti surfaces must be in the AFNI/SUMA standard ld141 format
+(198,812 vertices per hemisphere) to be compatible with braindata2 and
+brainplotter.
+
+BIDS note: leads.csv is closely analogous to the BIDS *_electrodes.tsv format
+(columns: name, x, y, z). A BIDS-formatted file can be used as the source for
+import after renaming the 'name' column to 'chanName'.
+
+--------------------------------------------------------------------------------
+KEY PARAMETERS  (sourceLocalizer)
 --------------------------------------------------------------------------------
 
 Default parameters are set automatically within prepareDeltaPosition and can
@@ -359,7 +517,7 @@ accumulated within sliding temporal windows rather than collapsed across the
 full recording, enabling visualization of how the source evolves over time
 (most relevant for seizure mode).
 
-See Trotta, et al. Human Brain Mapping 2015. 
+See Trotta, et al. Human Brain Mapping 2015.
 
 --------------------------------------------------------------------------------
 VISUALIZATION
@@ -433,10 +591,17 @@ NOTES AND CAVEATS
   pairs spanning hemispheres are excluded. The hemisphere used for each time
   point is chosen by majority vote among active sensor pairs.
 
-- Depth electrodes: Electrodes that cannot be projected to within 5 mm of
-  the pial surface (typically deep structures such as hippocampus) will
-  receive NaN geodesic assignments and will not contribute to sensor pairs
-  or localization.
+- Depth electrodes: Depth contacts are retained in leads.csv with their
+  CT-derived MR-space coordinates and participate in sensor pair construction.
+  However, electrodes that cannot be projected to within 5 mm of the pial
+  surface will receive a NaN geodesic assignment and will not contribute to
+  source localization.
+
+- Subdural projection: Subdural contacts are snapped to the nearest vertex on
+  the pial-outer-smoothed surface to correct for brain shift following
+  craniotomy. This is a nearest-neighbour projection and does not enforce
+  inter-electrode spacing constraints. For the sEEG-heavy use cases this
+  toolbox is primarily designed for, the resulting error is minimal.
 
 - Propagation speed: The assumed speed of 300 mm/s is consistent with values
   reported in the literature for cortical travelling waves. This parameter
@@ -458,6 +623,11 @@ NOTES AND CAVEATS
   localization loop (localizationFunction) use parfor. A MATLAB Parallel
   Computing Toolbox license and an active parallel pool will accelerate
   these steps substantially.
+
+- Surface mesh: electrodeLocalizer produces surfaces in the AFNI/SUMA standard
+  ld141 format (198,812 vertices per hemisphere). This is required for
+  compatibility with braindata2 ROI mapping. Surfaces imported via
+  importExistingLocalization() must also conform to this standard.
 
 --------------------------------------------------------------------------------
 CITATION
