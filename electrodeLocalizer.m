@@ -56,8 +56,7 @@ classdef electrodeLocalizer < handle
         CT_HU_THRESHOLD  = 1500;   % HU threshold for electrode detection
         MIN_CLUSTER_VOXELS = 3;    % minimum voxels per cluster
         MAX_CLUSTER_VOXELS = 500;  % maximum voxels per cluster (reject large artifacts)
-        FS_BIN_DEFAULT   = '/Applications/freesurfer/bin';
-        AFNI_BIN_DEFAULT = '/usr/local/abin';
+        AFNI_BIN_DEFAULT = fullfile(char(java.lang.System.getProperty('user.home')), 'abin');
     end
 
     properties (Hidden = true)
@@ -86,7 +85,7 @@ classdef electrodeLocalizer < handle
 
             p = inputParser;
             addParameter(p, 'forceNew',       false);
-            addParameter(p, 'freesurfer_bin', electrodeLocalizer.FS_BIN_DEFAULT);
+            addParameter(p, 'freesurfer_bin', electrodeLocalizer.defaultFsBin());
             addParameter(p, 'afni_bin',       electrodeLocalizer.AFNI_BIN_DEFAULT);
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
@@ -319,15 +318,16 @@ classdef electrodeLocalizer < handle
             % gifti toolbox
             prereqs.gifti = exist('gifti','file') == 2;
 
-            % FreeSurfer — check binary directly
+            % FreeSurfer — check that recon-all exists at the expected bin path.
+            % Executing it directly from MATLAB fails because recon-all is a
+            % shell script that requires FREESURFER_HOME to be set, which GUI
+            % MATLAB does not inherit from the user's shell profile.
             fsCmd = fullfile(self.fsBin, 'recon-all');
-            [fsStatus, ~] = system(sprintf('"%s" --version 2>/dev/null', fsCmd));
-            prereqs.freesurfer = (fsStatus == 0);
+            prereqs.freesurfer = exist(fsCmd, 'file') == 2;
 
-            % AFNI/SUMA — check for @SUMA_Make_Spec_FS
+            % AFNI/SUMA — check that @SUMA_Make_Spec_FS exists at the expected bin path.
             afniCmd = fullfile(self.afniBin, '@SUMA_Make_Spec_FS');
-            [afniStatus, ~] = system(sprintf('"%s" -help 2>/dev/null', afniCmd));
-            prereqs.afni = (afniStatus == 0);
+            prereqs.afni = exist(afniCmd, 'file') == 2;
 
             % --- Determine which missing items are actually required ---
             missing = {};
@@ -871,6 +871,48 @@ classdef electrodeLocalizer < handle
     end % methods
 
     methods (Static, Access = private)
+
+        function p = defaultFsBin()
+            % Locate the FreeSurfer bin directory by checking, in order:
+            %   1. FREESURFER_HOME environment variable
+            %   2. Version subdirectories under /Applications/freesurfer/
+            %      (handles installs like /Applications/freesurfer/8.1.0/)
+            %   3. /Applications/freesurfer/bin directly
+            % Whichever location first contains recon-all is returned.
+
+            base = '/Applications/freesurfer';
+
+            % 1. Env var (works when MATLAB is launched from a shell)
+            fsHome = getenv('FREESURFER_HOME');
+            if ~isempty(fsHome) && ...
+                    exist(fullfile(fsHome, 'bin', 'recon-all'), 'file') == 2
+                p = fullfile(fsHome, 'bin');
+                return;
+            end
+
+            % 2. Version subdirectories — sort descending so latest wins
+            if exist(base, 'dir') == 7
+                d = dir(base);
+                d = d([d.isdir] & ~strncmp({d.name}, '.', 1));
+                names = fliplr(sort({d.name}));
+                for i = 1:numel(names)
+                    candidate = fullfile(base, names{i}, 'bin');
+                    if exist(fullfile(candidate, 'recon-all'), 'file') == 2
+                        p = candidate;
+                        return;
+                    end
+                end
+
+                % 3. Direct install (no version subdir)
+                if exist(fullfile(base, 'bin', 'recon-all'), 'file') == 2
+                    p = fullfile(base, 'bin');
+                    return;
+                end
+            end
+
+            % Fallback — let checkPrerequisites report the miss clearly
+            p = fullfile(base, 'bin');
+        end
 
         function validateLeadsCSV(filepath, chanNames)
             % Validate that a CSV file is a usable leads table.
