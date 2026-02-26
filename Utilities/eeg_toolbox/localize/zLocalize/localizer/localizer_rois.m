@@ -14,7 +14,7 @@ function localizer_rois(subj, rootEEGdir, RERUN_ROI)
 
 
 
-    TOOLBOX         = 'commonFiles/eeg_toolbox';                   % eeg_toolbox directory
+    TOOLBOX         = 'Utilities/eeg_toolbox';                          % eeg_toolbox directory
     N_ROIC          = 2400;                                             % (coarse=600, fine=2400)
     R_ROI_MAX_DIST  = 10;                                               % maximum distance to store to vertices from ROIC's
     R_CONTACT       = 1.5;                                              % electrode contact radius (typical is 1.5mm radius)

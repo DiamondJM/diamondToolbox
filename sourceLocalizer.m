@@ -68,10 +68,12 @@ classdef sourceLocalizer < handle
             %       Default: false.
             %
             % Note:
-            %   timeSeries and Fs are NOT constructor arguments. Assign
-            %   them after construction:
+            %   timeSeries and Fs are NOT constructor arguments. Either
+            %   assign them directly after construction:
             %       sl.timeSeries = myData;   % [samples x channels]
             %       sl.Fs         = 1000;     % Hz
+            %   or load from a file via dialog (.mat, .edf, .fif):
+            %       sl.loadTimeSeries()
             %   Then call sl.localizationManager().
 
             p = inputParser;
@@ -103,6 +105,68 @@ classdef sourceLocalizer < handle
             %% Pull braindata
             self.retrieveBraindata;
 
+        end
+
+        %% Time series loading
+
+        function loadTimeSeries(self)
+            % Load a time series file via dialog and assign self.timeSeries,
+            % self.Fs, and (when appropriate) self.chanNames.
+            %
+            % Supported formats:
+            %   .mat — expects a 2-D numeric matrix [samples x channels] and
+            %          a scalar Fs variable (searches for Fs/fs/srate/etc.).
+            %          Falls back to an input dialog for Fs if not found.
+            %   .edf — requires MATLAB R2023a+ Signal Processing Toolbox
+            %          (edfread). Errors helpfully if unavailable.
+            %   .fif — requires FieldTrip (ft_read_header / ft_read_data)
+            %          on the MATLAB path. Errors helpfully if unavailable.
+            %
+            % Channel name resolution (chanNamesFromFile = names in the file):
+            %   chanNames empty,  file has names   → set silently.
+            %   chanNames set,    count matches     → leave existing.
+            %   chanNames set,    count mismatch    → warn and overwrite
+            %                                         (file header is
+            %                                         authoritative for its
+            %                                         own data).
+            %   chanNames empty,  file has no names → error (ambiguous).
+            %   chanNames set,    file has no names,
+            %     count mismatch                    → error.
+            %
+            % Dismiss the dialog to abort without changes.
+
+            [ts, Fs, chanNamesFromFile] = sourceLocalizer.loadTimeSeriesFromFile();
+
+            if isempty(ts)
+                fprintf('[sourceLocalizer] No time series loaded.\n');
+                return;
+            end
+
+            nCh = size(ts, 2);
+
+            if ~isempty(chanNamesFromFile)
+                if isempty(self.chanNames)
+                    self.chanNames = chanNamesFromFile;
+                elseif length(self.chanNames) ~= nCh
+                    warning('[sourceLocalizer] chanNames (%d) does not match time series channels (%d). Overwriting with names from file.', ...
+                        length(self.chanNames), nCh);
+                    self.chanNames = chanNamesFromFile;
+                end
+                % else: existing chanNames match → leave alone
+            else
+                if isempty(self.chanNames)
+                    error('[sourceLocalizer] chanNames is empty and the file provides no channel labels. Set sl.chanNames first.');
+                elseif length(self.chanNames) ~= nCh
+                    error('[sourceLocalizer] chanNames has %d entries but time series has %d channels.',...
+                        length(self.chanNames), nCh);
+                end
+                % else: existing chanNames match → fine
+            end
+
+            self.timeSeries = ts;
+            self.Fs         = Fs;
+            fprintf('[sourceLocalizer] Loaded %d samples x %d channels at %.1f Hz.\n', ...
+                size(ts,1), nCh, Fs);
         end
 
         %% Property setters
@@ -1868,17 +1932,90 @@ classdef sourceLocalizer < handle
 
     methods (Static)
 
+        function ensureFieldTrip()
+            % Ensure FieldTrip is on the MATLAB path, auto-detecting the
+            % installation if needed. Checks in order:
+            %   1. ft_read_header already on path → already configured.
+            %   2. ft_defaults on path → call it to finish setup.
+            %   3. FIELDTRIP_HOME environment variable.
+            %   4. Common install parent directories, scanning for
+            %      subdirectories matching 'fieldtrip*' (handles versioned
+            %      installs like fieldtrip-20260218); latest version wins.
+
+            if exist('ft_read_header', 'file') == 2
+                return;
+            end
+
+            if exist('ft_defaults', 'file') == 2
+                addpath(fileparts(which('ft_defaults')));
+                addpath(fullfile(fileparts(which('ft_defaults')), 'utilities'));
+                ft_defaults;
+                return;
+            end
+
+            home = char(java.lang.System.getProperty('user.home'));
+
+            parentDirs = {
+                getenv('FIELDTRIP_HOME');
+                fullfile(home, 'Documents', 'MATLAB');
+                fullfile(home, 'MATLAB');
+                fullfile(home, 'fieldtrip');
+                '/usr/local';
+            };
+
+            for i = 1:numel(parentDirs)
+                parent = parentDirs{i};
+                if isempty(parent) || exist(parent, 'dir') ~= 7
+                    continue;
+                end
+
+                % Parent itself might be the FieldTrip root
+                if exist(fullfile(parent, 'ft_defaults.m'), 'file') == 2
+                    addpath(parent);
+                    addpath(fullfile(parent, 'utilities'));
+                    ft_defaults;
+                    return;
+                end
+
+                % Scan for fieldtrip* subdirectories; sort descending so
+                % latest version wins
+                d = dir(fullfile(parent, 'fieldtrip*'));
+                d = d([d.isdir]);
+                if isempty(d), continue; end
+                names = fliplr(sort({d.name}));
+                for j = 1:numel(names)
+                    candidate = fullfile(parent, names{j});
+                    if exist(fullfile(candidate, 'ft_defaults.m'), 'file') == 2
+                        addpath(candidate);
+                        addpath(fullfile(candidate, 'utilities'));
+                        ft_defaults;
+                        return;
+                    end
+                end
+            end
+
+            error(['[sourceLocalizer] FieldTrip not found. Install from ' ...
+                   'fieldtriptoolbox.org and either add it to your MATLAB ' ...
+                   'path or set the FIELDTRIP_HOME environment variable.']);
+        end
+
         function chanNames = loadChanNamesFromFile()
-            % Prompt the user to select a .mat or .csv file containing
-            % channel names. Returns a column cell array of strings, or {}
-            % if the dialog is dismissed.
+            % Prompt the user to select a file containing channel names.
+            % Returns a column cell array of strings, or {} if dismissed.
+            %
+            % Supported formats:
+            %   .mat — loads a variable containing a cell array of strings.
+            %   .csv — first column used as channel names.
+            %   .fif — reads header only via FieldTrip ft_read_header;
+            %          accepts both head-only files (e.g. *-head.fif) and
+            %          full data files. Requires FieldTrip on the path.
 
             chanNames = {};
 
-            fprintf('Select a .mat or .csv file containing channel names.\n');
+            fprintf('Select a file containing channel names (.mat, .csv, or .fif).\n');
             fprintf('Cancel the dialog to proceed without channel names.\n');
             [fname, fpath] = uigetfile( ...
-                {'*.mat;*.csv', 'Channel names file (*.mat, *.csv)'}, ...
+                {'*.mat;*.csv;*.fif', 'Channel names file (*.mat, *.csv, *.fif)'}, ...
                 'Select channel names file (cancel to skip)');
 
             if isequal(fname, 0)
@@ -1910,8 +2047,14 @@ classdef sourceLocalizer < handle
             elseif strcmpi(ext, '.csv')
                 T = readtable(fullPath, 'ReadVariableNames', false);
                 chanNames = T{:, 1};
+
+            elseif strcmpi(ext, '.fif')
+                sourceLocalizer.ensureFieldTrip();
+                hdr       = ft_read_header(fullPath);
+                chanNames = hdr.label;
+
             else
-                error('Unsupported file type: %s. Use .mat or .csv.', ext);
+                error('Unsupported file type: %s. Use .mat, .csv, or .fif.', ext);
             end
 
             % Normalise to column cell array of char
@@ -1924,6 +2067,140 @@ classdef sourceLocalizer < handle
                 chanNames = cellstr(chanNames);
             end
             chanNames = chanNames(:);
+        end
+
+        function [timeSeries, Fs, chanNames] = loadTimeSeriesFromFile()
+            % Prompt the user to select a time series file and return its
+            % contents. Returns empty arrays if the dialog is dismissed.
+            %
+            % Returns:
+            %   timeSeries  [samples x channels] double
+            %   Fs          scalar sampling frequency (Hz)
+            %   chanNames   m x 1 cell array of channel name strings
+            %               (empty cell if the file provides none)
+
+            timeSeries = [];
+            Fs         = [];
+            chanNames  = {};
+
+            fprintf('Select a time series file (.mat, .edf, or .fif).\n');
+            fprintf('Cancel the dialog to skip.\n');
+
+            [fname, fpath] = uigetfile( ...
+                {'*.mat;*.edf;*.fif', 'Time series files (*.mat, *.edf, *.fif)'; ...
+                 '*.mat',             'MATLAB file (*.mat)'; ...
+                 '*.edf',             'European Data Format (*.edf)'; ...
+                 '*.fif',             'MNE FIF file (*.fif)'}, ...
+                'Select time series file (cancel to skip)');
+
+            if isequal(fname, 0)
+                fprintf('No file selected.\n');
+                return;
+            end
+
+            fullPath = fullfile(fpath, fname);
+            [~, ~, ext] = fileparts(fname);
+
+            switch lower(ext)
+                case '.mat'
+                    [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromMat(fullPath);
+                case '.edf'
+                    [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromEdf(fullPath);
+                case '.fif'
+                    [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromFif(fullPath);
+                otherwise
+                    error('[sourceLocalizer] Unsupported format: %s. Use .mat, .edf, or .fif.', ext);
+            end
+        end
+
+        function [ts, Fs, chanNames] = loadTsFromMat(fullPath)
+            % Load time series from a .mat file.
+            % Searches for a 2-D numeric matrix and a scalar Fs variable.
+
+            S      = load(fullPath);
+            fnames = fieldnames(S);
+
+            % Find 2-D numeric matrix candidates
+            is2d  = cellfun(@(f) isnumeric(S.(f)) && ismatrix(S.(f)) && ~isscalar(S.(f)), fnames);
+            candidates = fnames(is2d);
+
+            if isempty(candidates)
+                error('[sourceLocalizer] No 2-D numeric matrix found in %s.', fullPath);
+            elseif isscalar(candidates)
+                tsVar = candidates{1};
+            else
+                [idx, ok] = listdlg( ...
+                    'ListString',   candidates, ...
+                    'SelectionMode','single', ...
+                    'PromptString', 'Select variable containing time series [samples x channels]:');
+                if ~ok
+                    ts = []; Fs = []; chanNames = {};
+                    return;
+                end
+                tsVar = candidates{idx};
+            end
+
+            ts = double(S.(tsVar));
+
+            % Locate Fs
+            fsFields = {'Fs','fs','srate','SampleRate','sample_rate','samplingRate','Srate'};
+            Fs = [];
+            for i = 1:numel(fsFields)
+                if isfield(S, fsFields{i}) && isscalar(S.(fsFields{i}))
+                    Fs = double(S.(fsFields{i}));
+                    break;
+                end
+            end
+            if isempty(Fs)
+                answer = inputdlg('Sampling frequency (Hz):', 'Enter Fs', 1, {'1000'});
+                if isempty(answer)
+                    error('[sourceLocalizer] Sampling frequency is required.');
+                end
+                Fs = str2double(answer{1});
+            end
+
+            % Locate channel names
+            cnFields = {'chanNames','chan_names','chans','labels','channel_names','channels','label'};
+            chanNames = {};
+            for i = 1:numel(cnFields)
+                if isfield(S, cnFields{i})
+                    v = S.(cnFields{i});
+                    if iscell(v) || isstring(v)
+                        chanNames = cellstr(v(:));
+                        break;
+                    end
+                end
+            end
+        end
+
+        function [ts, Fs, chanNames] = loadTsFromEdf(fullPath)
+            % Load time series from an EDF file.
+            % Requires MATLAB R2023a+ Signal Processing Toolbox (edfread).
+
+            assert(exist('edfread', 'file') == 2, ...
+                ['edfread not found. EDF import requires MATLAB R2023a+ with the ' ...
+                 'Signal Processing Toolbox.']);
+
+            [data, info] = edfread(fullPath, 'OutputFormat', 'array');
+
+            % edfread with 'array' returns [channels x samples]
+            ts        = data';
+            Fs        = info.NumSamples(1) / info.DataRecordDuration;
+            chanNames = info.SignalLabels(:);
+        end
+
+        function [ts, Fs, chanNames] = loadTsFromFif(fullPath)
+            % Load time series from an MNE FIF file.
+            % Requires FieldTrip (ft_read_header / ft_read_data) on path.
+
+            sourceLocalizer.ensureFieldTrip();
+
+            hdr = ft_read_header(fullPath);
+            dat = ft_read_data(fullPath, 'header', hdr);  % [channels x samples]
+
+            ts        = dat';                % [samples x channels]
+            Fs        = hdr.Fs;
+            chanNames = hdr.label(:);        % column cell array
         end
 
     end
