@@ -192,8 +192,6 @@ classdef braindata2 < handle
                 bd.filepaths.roic_lead_mono    = fullfile(dsubj, 'tal/roi/lead_ROIC_LUT_monopolar.mat');
                 bd.filepaths.roic_lead_bipo    = fullfile(dsubj, 'tal/roi/lead_ROIC_LUT_bipolar.mat');
                 
-                % bd.filepaths.roic_roi_lh       = fullfile('/Users/diamondjm/Documents/Josh_work/commonFiles/Braindata',bd.subj,'ROIC_mesh_LUT_lh.csv');
-                % bd.filepaths.roic_roi_rh       = fullfile('/Users/diamondjm/Documents/Josh_work/commonFiles/Braindata',bd.subj,'ROIC_mesh_LUT_rh.csv');
                 bd.filepaths.roic_roi_lh       = fullfile(dsubj, 'tal/roi/ROIC_mesh_LUT_lh.csv');
                 bd.filepaths.roic_roi_rh       = fullfile(dsubj, 'tal/roi/ROIC_mesh_LUT_rh.csv');
                 

@@ -833,7 +833,7 @@ classdef sourceLocalizer < handle
 
         function extractPhasePower(self)
 
-            assert(exist('seizureWindowFilt','file'),'This file should exist in diamondToolbox/commonFiles/Filt. Please check paths.');
+            assert(exist('seizureWindowFilt','file'),'This file should exist in diamondToolbox/Utilities/Filt. Please check paths.');
 
             thisFilter = @seizureWindowFilt;
             self.sourceLocalizationResults.paramStruct.filter = thisFilter;

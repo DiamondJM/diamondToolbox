@@ -13,7 +13,6 @@ useAlternative = p.Results.useAlternative;
 %% Plotting
 
 [myBd, myBp] = retrieveBraindata(subj,'useAlternative',useAlternative);
-% load('/Users/diamondjm/Documents/Josh_work/commonFiles/Legacy/Temp_BD/NIH023/bdBpFull.mat')
 if newPlot; myBd.ezplot(myBp,gca); end
 
 [lhLoc,rhLoc] = resectedVerticesLocations(subj,'useAlternative',useAlternative);
