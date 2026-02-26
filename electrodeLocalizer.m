@@ -147,10 +147,10 @@ classdef electrodeLocalizer < handle
             % committing to the full pipeline.
             if ~self.isComplete()
                 choice = questdlg( ...
-                    sprintf('Localization files not found for %s.\n\nHow would you like to proceed?', self.subj), ...
+                    sprintf('Localization files (leads.csv, lh.pial.gii, rh.pial.gii) not found for %s.\n\nHow would you like to proceed?', self.subj), ...
                     'electrodeLocalizer', ...
-                    'Run Pipeline', 'Import Existing Files', 'Cancel', ...
-                    'Run Pipeline');
+                    'Run localization pipeline to create them', 'These files already exist; import them', 'Cancel', ...
+                    'Run localization pipeline to create them');
 
                 if isempty(choice) || strcmp(choice, 'Cancel')
                     fprintf('[electrodeLocalizer] Cancelled.\n');
@@ -408,37 +408,43 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function getInputFiles(self)
-            % Prompt for pre-op MRI and post-op CT nifti files if not
-            % already present in the zloc folder structure. Copies selected
-            % files to the expected locations.
+            % Prompt for pre-op MRI and post-op CT imaging files if not
+            % already present in the zloc folder structure.
+            %
+            % Accepted formats: .nii, .nii.gz, .mgz
+            %   .nii     — copied directly.
+            %   .nii.gz  — decompressed via MATLAB gunzip.
+            %   .mgz     — converted via FreeSurfer mri_convert (uses fsBin).
+
+            filter = {'*.nii;*.nii.gz;*.mgz', 'Imaging files (*.nii, *.nii.gz, *.mgz)'};
 
             mrDest  = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
             ctDest  = fullfile(self.locDirs.ct_1,   'ct_implant.nii');
 
             % MRI
             if exist(mrDest, 'file') ~= 2
-                fprintf('Select pre-operative MRI nifti (T1 MPRAGE)...\n');
-                [f, d] = uigetfile('*.nii', 'Select pre-op MRI nifti');
+                fprintf('Select pre-operative MRI (T1 MPRAGE) — .nii, .nii.gz, or .mgz...\n');
+                [f, d] = uigetfile(filter, 'Select pre-op MRI');
                 if isequal(f, 0)
-                    error('[electrodeLocalizer] MRI nifti is required.');
+                    error('[electrodeLocalizer] MRI is required.');
                 end
-                copyfile(fullfile(d, f), mrDest);
-                fprintf('MRI copied to %s\n', mrDest);
+                self.convertToNii(fullfile(d, f), mrDest);
+                fprintf('MRI ready at %s\n', mrDest);
             else
-                fprintf('MRI nifti already present: %s\n', mrDest);
+                fprintf('MRI already present: %s\n', mrDest);
             end
 
             % CT
             if exist(ctDest, 'file') ~= 2
-                fprintf('Select post-operative CT nifti...\n');
-                [f, d] = uigetfile('*.nii', 'Select post-op CT nifti');
+                fprintf('Select post-operative CT — .nii, .nii.gz, or .mgz...\n');
+                [f, d] = uigetfile(filter, 'Select post-op CT');
                 if isequal(f, 0)
-                    error('[electrodeLocalizer] CT nifti is required.');
+                    error('[electrodeLocalizer] CT is required.');
                 end
-                copyfile(fullfile(d, f), ctDest);
-                fprintf('CT copied to %s\n', ctDest);
+                self.convertToNii(fullfile(d, f), ctDest);
+                fprintf('CT ready at %s\n', ctDest);
             else
-                fprintf('CT nifti already present: %s\n', ctDest);
+                fprintf('CT already present: %s\n', ctDest);
             end
         end
 
@@ -452,10 +458,11 @@ classdef electrodeLocalizer < handle
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
 
-            surfDir = fullfile(self.locDirs.fs_subj, 'surf');
-            lhPial  = fullfile(surfDir, 'lh.pial-outer-smoothed');
-            rhPial  = fullfile(surfDir, 'rh.pial-outer-smoothed');
-            done    = exist(lhPial, 'file') == 2 && exist(rhPial, 'file') == 2;
+            surfDir  = fullfile(self.locDirs.fs_subj, 'surf');
+            lhPial   = fullfile(surfDir, 'lh.pial-outer-smoothed');
+            rhPial   = fullfile(surfDir, 'rh.pial-outer-smoothed');
+            origMgz  = fullfile(self.locDirs.fs_subj, 'mri', 'orig.mgz');
+            done    = exist(lhPial, 'file') == 2 && exist(rhPial, 'file') == 2 && exist(origMgz, 'file') == 2;
 
             if done && ~forceNew
                 fprintf('[Stage 3] Surface already exists; skipping recon-all.\n');
@@ -463,6 +470,16 @@ classdef electrodeLocalizer < handle
             end
 
             fprintf('[Stage 3] Running FreeSurfer surface reconstruction...\n');
+
+            % Pre-set FREESURFER (bare, no _HOME) so recon-all can find it
+            % even when its own `setenv LANG C` (issued before sourcing
+            % FreeSurferEnv.csh) prevents the source chain from setting it.
+            % Also ensures FREESURFER_HOME is in the environment for any
+            % FreeSurfer tool that needs it.
+            fsHome = fileparts(self.fsBin);
+            setenv('FREESURFER',      fsHome);
+            setenv('FREESURFER_HOME', fsHome);
+
             mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
             create_surf(self.subj, mrNii, self.locDirs.fs, ...
                 'freesurfer_bin', self.fsBin);
@@ -869,6 +886,50 @@ classdef electrodeLocalizer < handle
         end
 
     end % methods
+
+    methods (Access = private)
+
+        function convertToNii(self, srcFile, destFile)
+            % Convert an imaging file to uncompressed NIfTI at destFile.
+            %
+            % Supported inputs:
+            %   .nii     — copied directly.
+            %   .nii.gz  — decompressed with MATLAB gunzip.
+            %   .mgz     — converted via FreeSurfer's MRIread/MRIwrite MATLAB tools.
+
+            if endsWith(lower(srcFile), '.nii.gz')
+                tmpDir   = tempname;
+                mkdir(tmpDir);
+                result   = gunzip(srcFile, tmpDir);
+                movefile(result{1}, destFile);
+                rmdir(tmpDir, 's');
+            else
+                [~, ~, ext] = fileparts(srcFile);
+                switch lower(ext)
+                    case '.nii'
+                        copyfile(srcFile, destFile);
+                    case '.mgz'
+                        % Use FreeSurfer's bundled MATLAB tools to read .mgz
+                        % and write .nii — avoids mri_convert binary entirely
+                        % (which may be ARM64-native while MATLAB runs x86_64
+                        % under Rosetta on Apple Silicon).
+                        fsMatlabDir = fullfile(fileparts(self.fsBin), 'matlab');
+                        if exist(fsMatlabDir, 'dir') ~= 7
+                            error('[electrodeLocalizer] FreeSurfer MATLAB tools not found at: %s', fsMatlabDir);
+                        end
+                        addpath(fsMatlabDir);
+                        mri = MRIread(srcFile);
+                        err = MRIwrite(mri, destFile);
+                        if err ~= 0
+                            error('[electrodeLocalizer] MRIwrite failed writing: %s', destFile);
+                        end
+                    otherwise
+                        error('[electrodeLocalizer] Unsupported format: %s', ext);
+                end
+            end
+        end
+
+    end % methods (Access = private)
 
     methods (Static, Access = private)
 

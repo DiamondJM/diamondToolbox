@@ -67,13 +67,13 @@ function suma(subject, varargin)
     
     % Check path for binaries
     if ~check_for_system_bin('suma')
-        addpath_system(fs_bin);
+        addpath_system(afni_bin);
     end
-    if ~check_for_system_bin('freesurfer')
+    if ~check_for_system_bin('mri_convert')
         addpath_system(fs_bin);
     end
 
-    if system('type suma') ~= 0
+    if ~check_for_system_bin('suma')
         error(['ERROR: Cant find the suma command from MATLAB'...
             '. Start MATLAB from terminal or pass in afni_bin']);
     end
