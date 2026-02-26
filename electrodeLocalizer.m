@@ -149,15 +149,15 @@ classdef electrodeLocalizer < handle
                 choice = questdlg( ...
                     sprintf('Localization files (leads.csv, lh.pial.gii, rh.pial.gii) not found for %s. How would you like to proceed?', self.subj), ...
                     'electrodeLocalizer', ...
-                    'Run localization pipeline to create them', 'These files already exist; import them', 'Cancel', ...
-                    'Run localization pipeline to create them');
+                    'Create these files', 'Import these files', 'Cancel', ...
+                    'Create these files');
 
                 if isempty(choice) || strcmp(choice, 'Cancel')
                     fprintf('[electrodeLocalizer] Cancelled.\n');
                     return;
                 end
 
-                if strcmp(choice, 'These files already exist; import them')
+                if strcmp(choice, 'Import these files')
                     self.importExistingLocalization();
                     if self.isComplete()
                         return;   % import covered everything needed
