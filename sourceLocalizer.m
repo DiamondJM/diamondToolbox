@@ -83,10 +83,8 @@ classdef sourceLocalizer < handle
             chanNames              = p.Results.chanNames;
             forceNewElecLoc        = p.Results.forceNewElecLoc;
 
-            [~, currentPath] = fileparts(pwd);
-            assert(isequal(currentPath, 'diamondToolbox'), ...
-                'Please change directory to diamondToolbox.');
-            addpath(genpath(pwd));
+            toolboxRoot = fileparts(mfilename('fullpath'));
+            addpath(genpath(toolboxRoot));
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
@@ -231,11 +229,7 @@ classdef sourceLocalizer < handle
                 myBd = braindata2(self.subj,self.rootFolder);
                 myBp = ez_get_plotter(myBd);
 
-                if saving
-                    if isfolder(subjDir); rmdir(subjDir,'s'); end
-                    mkdir(fullfile(subjDir));
-                    save(fullfile(subjDir,'bdBpFull'),'myBd','myBp')
-                end
+                if saving; save(fullfile(subjDir,'bdBpFull'),'myBd','myBp'); end
 
             end
 
