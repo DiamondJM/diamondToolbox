@@ -542,9 +542,6 @@ classdef electrodeLocalizer < handle
             assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
             assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s',  ctNii);
 
-            % align.sh expects filenames without extension and a work dir.
-            % It writes the combined affine + centering transform to:
-            %   <workDir>/full_ct_implant_XFMTO_lpc_mr_pre_do_mat.aff12.1D
             alignScript = fullfile(fileparts(mfilename('fullpath')), ...
                 'Utilities', 'eeg_toolbox', 'localize', 'zLocalize', ...
                 'shell_scripts', 'align.sh');
@@ -559,21 +556,53 @@ classdef electrodeLocalizer < handle
             if exist(ctWork,'file') ~= 2, copyfile(ctNii, ctWork); end
 
             setenv('PATH', [getenv('PATH') ':' self.afniBin]);
-            cmd = sprintf('bash "%s" mr_pre ct_implant "%s"', alignScript, workDir);
-            fprintf('[Stage 5] Running: %s\n', cmd);
-            [status, txt] = unix(cmd);
-            if status ~= 0
-                fprintf('%s\n', txt);
-                error('[Stage 5] align.sh failed (exit %d).', status);
+
+            % Skip align.sh if the combined transform already exists.
+            % align_epi_anat.py can hang on its 3dNotes history step even after
+            % the actual alignment finishes; skipping avoids repeated hangs.
+            hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+            if isempty(hits)
+                fprintf('[Stage 5] Running align.sh (this may take several minutes)...\n');
+                cmd = sprintf('bash "%s" mr_pre ct_implant "%s"', alignScript, workDir);
+                [status, txt] = unix(cmd);
+                if status ~= 0
+                    fprintf('%s\n', txt);
+                    % Non-zero exit may reflect a 3dNotes hang (not a fatal error).
+                    % Fall through and check whether the key outputs were created.
+                    fprintf('[Stage 5] align.sh exited %d — checking for outputs...\n', status);
+                end
+
+                % align_epi_anat.py may have succeeded even if align.sh exit was
+                % non-zero (e.g. 3dNotes hanging at the end).  If the per-step
+                % affine exists but the combined transform does not, run cat_matvec.
+                hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+                if isempty(hits)
+                    % Try to build the full transform from the per-step files.
+                    xfmAf   = dir(fullfile(workDir, '*_XFMTO_lpc_*_mat.aff12.1D'));
+                    xfmShft = fullfile(workDir, 'ct_implant_shft.1D');
+                    if ~isempty(xfmAf) && exist(xfmShft,'file') == 2
+                        xfmAfPath  = fullfile(workDir, xfmAf(1).name);
+                        xfmFullName = ['full_' xfmAf(1).name];
+                        xfmFullPath = fullfile(workDir, xfmFullName);
+                        fprintf('[Stage 5] Running cat_matvec to combine transforms...\n');
+                        catCmd = sprintf('cat_matvec -ONELINE "%s" "%s" > "%s"', ...
+                            xfmAfPath, xfmShft, xfmFullPath);
+                        [cstatus, ctxt] = unix(catCmd);
+                        if cstatus ~= 0
+                            fprintf('%s\n', ctxt);
+                        end
+                        hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+                    end
+                end
+
+                assert(~isempty(hits), ...
+                    '[Stage 5] Alignment did not produce a .aff12.1D transform.\n  workDir: %s', workDir);
+            else
+                fprintf('[Stage 5] Existing AFNI transform found; skipping align.sh.\n');
             end
 
-            % Find the combined transform produced by align.sh.
-            % Glob for robustness against naming variations in the script.
-            hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
-            assert(~isempty(hits), ...
-                '[Stage 5] align.sh did not produce a .aff12.1D transform in:\n  %s\nCheck output above.', workDir);
             aff1D = fullfile(workDir, hits(1).name);
-            fprintf('[Stage 5] AFNI transform: %s\n', hits(1).name);
+            fprintf('[Stage 5] Using AFNI transform: %s\n', hits(1).name);
 
             save(xfmFile, 'aff1D');
             fprintf('[Stage 5] Transform path saved to %s\n', xfmFile);
