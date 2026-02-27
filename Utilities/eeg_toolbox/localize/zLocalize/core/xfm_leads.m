@@ -55,7 +55,9 @@ function mr_coords = xfm_leads(ct_coords, xfm_file, ct_file, coord_format, varar
 
     
     assert(exist(xfm_file, 'file') > 0, 'xfm_file not found: %s\n', xfm_file);
-    assert(exist(sprintf('%s.BRIK', ct_file), 'file') > 0, 'CT file not found: %s.BRIK\n', ct_file);
+    assert(exist(sprintf('%s.BRIK', ct_file), 'file') > 0 || ...
+           exist(sprintf('%s.BRIK.gz', ct_file), 'file') > 0, ...
+           'CT file not found: %s.BRIK(.gz)\n', ct_file);
     
     switch upper(coord_format)
         case 'VOXEL',   fname_vox = 'vox.txt';  is_vox = 1;

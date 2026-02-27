@@ -654,11 +654,13 @@ classdef electrodeLocalizer < handle
                 fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
             end
 
-            % CT BRIK created by align.sh (3dresample -orient RAI)
+            % CT BRIK created by align.sh (3dresample -orient RAI).
+            % AFNI writes compressed BRIK.gz by default; check both forms.
             workDir = self.locDirs.ct_1_xfm;
             ctBrik  = fullfile(workDir, 'ct_implant+orig');
-            assert(exist([ctBrik '.BRIK'], 'file') == 2, ...
-                '[Stage 6] CT BRIK not found: %s.BRIK\n  Re-run coregisterCT.', ctBrik);
+            assert(exist([ctBrik '.BRIK'], 'file') == 2 || ...
+                   exist([ctBrik '.BRIK.gz'], 'file') == 2, ...
+                '[Stage 6] CT BRIK not found: %s.BRIK(.gz)\n  Re-run coregisterCT.', ctBrik);
 
             % Ensure AFNI tools are on PATH
             setenv('PATH', [getenv('PATH') ':' self.afniBin]);
