@@ -18,8 +18,8 @@ classdef electrodeLocalizer < handle
 %   2. getInputFiles     — file dialogs for MRI + CT nifti; copy to zloc/
 %   3. runSurface        — FreeSurfer recon-all + pial-outer-smoothed envelope
 %   4. runSuma           — AFNI/SUMA standard ld141 mesh → gifti files
-%   5. coregisterCT      — SPM rigid-body CT→MR registration
-%   6. detectElectrodes  — threshold + connected-components on CT volume
+%   5. coregisterCT      — AFNI rigid-body CT→MR registration
+%   6. detectElectrodes  — AFNI 3dclust on CT → cluster centroids in MR space
 %   7. namingGUI         — interactive 3-D figure; user names each cluster,
 %                          labels it depth or subdural, or marks as artifact
 %   8. projectElectrodes — subdural contacts snapped to nearest pial vertex;
@@ -29,7 +29,7 @@ classdef electrodeLocalizer < handle
 % DEPENDENCIES
 %   FreeSurfer  — recon-all surface reconstruction
 %   AFNI/SUMA   — @SUMA_Make_Spec_FS standard mesh (ld141, 198 812 vertices)
-%   SPM         — spm_coreg CT-to-MR coregistration (must be on MATLAB path)
+%   AFNI        — align.sh CT→MR coregistration; 3dclust electrode detection
 %   gifti       — bundled in Utilities/eeg_toolbox/localize/zLocalize/packages/
 %
 % OUTPUTS
@@ -53,10 +53,10 @@ classdef electrodeLocalizer < handle
     end
 
     properties (Constant)
-        CT_HU_THRESHOLD  = 1500;   % HU threshold for electrode detection
-        MIN_CLUSTER_VOXELS = 3;    % minimum voxels per cluster
-        MAX_CLUSTER_VOXELS = 500;  % maximum voxels per cluster (reject large artifacts)
-        AFNI_BIN_DEFAULT = fullfile(char(java.lang.System.getProperty('user.home')), 'abin');
+        CT_HU_THRESHOLD   = 1500;  % HU threshold for electrode detection (Hounsfield units)
+        AFNI_CLUSTER_RMM  = 1;     % 3dclust: max neighbor distance in mm (rmm)
+        AFNI_CLUSTER_VMUL = 10;    % 3dclust: minimum cluster volume in µl (vmul)
+        AFNI_BIN_DEFAULT  = fullfile(char(java.lang.System.getProperty('user.home')), 'abin');
     end
 
     properties (Hidden = true)
@@ -103,7 +103,7 @@ classdef electrodeLocalizer < handle
                 return;
             end
 
-            self.run();
+            self.run('forceNew', forceNew);
         end
 
         % -----------------------------------------------------------------
@@ -170,8 +170,8 @@ classdef electrodeLocalizer < handle
 
             self.checkPrerequisites('errorIfMissing', true);
             self.getInputFiles();
-            self.runSurface('forceNew', forceNew);
-            self.runSuma('forceNew', forceNew);
+            self.runSurface();           % never force — recon-all takes hours
+            self.runSuma();              % never force — SUMA takes minutes
             self.coregisterCT('forceNew', forceNew);
             self.detectElectrodes('forceNew', forceNew);
             self.namingGUI();
@@ -281,7 +281,6 @@ classdef electrodeLocalizer < handle
             %
             % Returns a struct with logical fields:
             %   .imageProcessingToolbox
-            %   .spm
             %   .gifti
             %   .freesurfer
             %   .afni
@@ -298,7 +297,7 @@ classdef electrodeLocalizer < handle
             rhPial     = fullfile(surfDir, 'rh.pial-outer-smoothed');
             lhGii      = fullfile(sumaDir, 'lh.pial-outer-smoothed.gii');
             rhGii      = fullfile(sumaDir, 'rh.pial-outer-smoothed.gii');
-            xfmFile    = fullfile(self.locDirs.ct_1_xfm, 'transform_spm.mat');
+            xfmFile    = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             clustFile  = fullfile(self.locDirs.ct_1_xfm, 'clusters_mr.mat');
 
             needSurface = ~(exist(lhPial,'file')==2 && exist(rhPial,'file')==2);
@@ -307,13 +306,6 @@ classdef electrodeLocalizer < handle
             needDetect  = exist(clustFile,'file') ~= 2;
 
             % --- Check each prerequisite ---
-
-            % Image Processing Toolbox (bwconncomp, regionprops3)
-            prereqs.imageProcessingToolbox = ...
-                license('test','image_toolbox') && exist('bwconncomp','file') == 2;
-
-            % SPM
-            prereqs.spm = exist('spm_coreg','file') == 2;
 
             % gifti toolbox
             prereqs.gifti = exist('gifti','file') == 2;
@@ -331,20 +323,6 @@ classdef electrodeLocalizer < handle
 
             % --- Determine which missing items are actually required ---
             missing = {};
-
-            if ~prereqs.imageProcessingToolbox && needDetect
-                missing{end+1} = sprintf( ...
-                    '  [REQUIRED] MATLAB Image Processing Toolbox\n%s\n%s', ...
-                    '             Needed for: electrode cluster detection (stage 6)', ...
-                    '             Fix: install the Image Processing Toolbox add-on.');
-            end
-
-            if ~prereqs.spm && needCoreg
-                missing{end+1} = sprintf( ...
-                    '  [REQUIRED] SPM\n%s\n%s', ...
-                    '             Needed for: CT-MR coregistration (stage 5)', ...
-                    '             Fix: download SPM (https://www.fil.ion.ucl.ac.uk/spm/) and add to MATLAB path.');
-            end
 
             if ~prereqs.gifti
                 missing{end+1} = sprintf( ...
@@ -373,8 +351,6 @@ classdef electrodeLocalizer < handle
             fprintf('\n+----------------------------------------------------------+\n');
             fprintf('|       electrodeLocalizer — Prerequisites (%s)\n', self.subj);
             fprintf('+----------------------------------------------------------+\n');
-            electrodeLocalizer.printPrereqLine('Image Processing Toolbox', prereqs.imageProcessingToolbox, needDetect);
-            electrodeLocalizer.printPrereqLine('SPM (spm_coreg)',           prereqs.spm,                   needCoreg);
             electrodeLocalizer.printPrereqLine('gifti toolbox',             prereqs.gifti,                 true);
             electrodeLocalizer.printPrereqLine(sprintf('FreeSurfer  (%s)', self.fsBin),  prereqs.freesurfer, needSurface);
             electrodeLocalizer.printPrereqLine(sprintf('AFNI/SUMA   (%s)', self.afniBin), prereqs.afni,      needSuma);
@@ -458,11 +434,10 @@ classdef electrodeLocalizer < handle
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
 
-            surfDir  = fullfile(self.locDirs.fs_subj, 'surf');
-            lhPial   = fullfile(surfDir, 'lh.pial-outer-smoothed');
-            rhPial   = fullfile(surfDir, 'rh.pial-outer-smoothed');
-            origMgz  = fullfile(self.locDirs.fs_subj, 'mri', 'orig.mgz');
-            done    = exist(lhPial, 'file') == 2 && exist(rhPial, 'file') == 2 && exist(origMgz, 'file') == 2;
+            surfDir = fullfile(self.locDirs.fs_subj, 'surf');
+            lhPial  = fullfile(surfDir, 'lh.pial-outer-smoothed');
+            rhPial  = fullfile(surfDir, 'rh.pial-outer-smoothed');
+            done    = exist(lhPial, 'file') == 2 && exist(rhPial, 'file') == 2;
 
             if done && ~forceNew
                 fprintf('[Stage 3] Surface already exists; skipping recon-all.\n');
@@ -506,74 +481,118 @@ classdef electrodeLocalizer < handle
             end
 
             fprintf('[Stage 4] Running SUMA to generate standard ld141 mesh...\n');
+
+            % @SUMA_Make_Spec_FS requires mri/orig.mgz and an mri/orig/
+            % directory (even if empty). Subjects from public datasets often
+            % omit these; T1.mgz is equivalent to orig.mgz.
+            mriDir  = fullfile(self.locDirs.fs_subj, 'mri');
+            origMgz = fullfile(mriDir, 'orig.mgz');
+            origDir = fullfile(mriDir, 'orig');
+            t1Mgz   = fullfile(mriDir, 'T1.mgz');
+            if exist(origMgz, 'file') ~= 2 && exist(t1Mgz, 'file') == 2
+                fprintf('[Stage 4] orig.mgz not found; copying T1.mgz as orig.mgz.\n');
+                copyfile(t1Mgz, origMgz);
+            end
+            if exist(origDir, 'dir') ~= 7
+                fprintf('[Stage 4] mri/orig/ directory not found; creating it.\n');
+                mkdir(origDir);
+            end
+
             suma(self.subj, self.locDirs.fs, ...
                 'afni_bin',       self.afniBin, ...
                 'freesurfer_bin', self.fsBin, ...
                 'rerun',          forceNew);
+
+            % @SUMA_Make_Spec_FS sometimes exits 0 even on failure.
+            % Verify the expected output actually exists.
+            if exist(lhGii, 'file') ~= 2 || exist(rhGii, 'file') ~= 2
+                error('[Stage 4] SUMA ran but expected output not found:\n  %s\n  %s', ...
+                    lhGii, rhGii);
+            end
         end
 
         % -----------------------------------------------------------------
-        %% Stage 5 — CT-to-MR coregistration via SPM
+        %% Stage 5 — CT-to-MR coregistration via AFNI
         % -----------------------------------------------------------------
 
         function coregisterCT(self, varargin)
             % Rigid-body coregistration of post-op CT to pre-op MRI using
-            % SPM's normalised mutual information cost function.
-            % Saves the resulting 4x4 world-space transform to
-            % zloc/CT_1/transform/transform_spm.mat.
+            % AFNI align.sh (LPC cost function, @Align_Centers initialisation).
+            % Saves the path to the .aff12.1D combined transform to
+            % zloc/CT_1/transform/transform.mat.
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
 
-            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform_spm.mat');
+            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             if exist(xfmFile, 'file') == 2 && ~forceNew
                 fprintf('[Stage 5] CT-MR transform already exists; skipping.\n');
                 return;
             end
 
-            assert(exist('spm_coreg', 'file') == 2, ...
-                '[electrodeLocalizer] SPM not found on MATLAB path. Please add SPM.');
+            assert(exist(fullfile(self.afniBin, 'align_epi_anat.py'), 'file') == 2, ...
+                '[electrodeLocalizer] AFNI not found at %s. Pass ''afni_bin'' to sourceLocalizer.', self.afniBin);
 
-            fprintf('[Stage 5] Coregistering CT to MR via SPM...\n');
+            fprintf('[Stage 5] Coregistering CT to MR via AFNI align.sh...\n');
 
-            mrNii = fullfile(self.locDirs.mr_pre,  'mr_pre.nii');
-            ctNii = fullfile(self.locDirs.ct_1,    'ct_implant.nii');
+            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            ctNii = fullfile(self.locDirs.ct_1,   'ct_implant.nii');
+            assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
+            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s',  ctNii);
 
-            VF = spm_vol(mrNii);   % fixed  = MRI
-            VG = spm_vol(ctNii);   % moving = CT
+            % align.sh expects filenames without extension and a work dir.
+            % It writes the combined affine + centering transform to:
+            %   <workDir>/full_ct_implant_XFMTO_lpc_mr_pre_do_mat.aff12.1D
+            alignScript = fullfile(fileparts(mfilename('fullpath')), ...
+                'Utilities', 'eeg_toolbox', 'localize', 'zLocalize', ...
+                'shell_scripts', 'align.sh');
+            assert(exist(alignScript,'file')==2, ...
+                '[electrodeLocalizer] align.sh not found at: %s', alignScript);
 
-            % spm_coreg returns 6 rigid-body params [x y z pitch roll yaw]
-            % in the world coordinate frames of both volumes.
-            flags.cost_fun = 'nmi';
-            flags.sep      = [4 2];
-            flags.tol      = [0.02 0.02 0.02 0.001 0.001 0.001];
-            flags.fwhm     = [7 7];
-            x = spm_coreg(VF, VG, flags);
+            workDir = self.locDirs.ct_1_xfm;
+            % Copy inputs to work dir so align.sh can find them by stem
+            mrWork = fullfile(workDir, 'mr_pre.nii');
+            ctWork = fullfile(workDir, 'ct_implant.nii');
+            if exist(mrWork,'file') ~= 2, copyfile(mrNii, mrWork); end
+            if exist(ctWork,'file') ~= 2, copyfile(ctNii, ctWork); end
 
-            % Build the 4x4 transform: CT voxels → MRI world mm (RAS).
-            %
-            % spm_coreg(VF, VG) returns x such that spm_matrix(x) maps
-            % CT world coordinates into MRI world coordinates.  Prepending
-            % VG.mat (CT vox-to-world) gives a single matrix that takes
-            % CT voxel indices directly to MRI RAS mm:
-            %
-            %   P_mr_mm = M_ct2mr * [vox_i; vox_j; vox_k; 1]
-            %
-            M_ct2mr = spm_matrix(x) * VG.mat;
+            setenv('PATH', [getenv('PATH') ':' self.afniBin]);
+            cmd = sprintf('bash "%s" mr_pre ct_implant "%s"', alignScript, workDir);
+            fprintf('[Stage 5] Running: %s\n', cmd);
+            [status, txt] = unix(cmd);
+            if status ~= 0
+                fprintf('%s\n', txt);
+                error('[Stage 5] align.sh failed (exit %d).', status);
+            end
 
-            save(xfmFile, 'M_ct2mr', 'x');
-            fprintf('[Stage 5] Transform saved to %s\n', xfmFile);
+            % Find the combined transform produced by align.sh.
+            % Glob for robustness against naming variations in the script.
+            hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+            assert(~isempty(hits), ...
+                '[Stage 5] align.sh did not produce a .aff12.1D transform in:\n  %s\nCheck output above.', workDir);
+            aff1D = fullfile(workDir, hits(1).name);
+            fprintf('[Stage 5] AFNI transform: %s\n', hits(1).name);
+
+            save(xfmFile, 'aff1D');
+            fprintf('[Stage 5] Transform path saved to %s\n', xfmFile);
         end
 
         % -----------------------------------------------------------------
-        %% Stage 6 — electrode cluster detection
+        %% Stage 6 — electrode cluster detection via AFNI
         % -----------------------------------------------------------------
 
         function detectElectrodes(self, varargin)
-            % Threshold the CT volume and extract cluster centroids.
+            % Detect electrode clusters using AFNI 3dclust (ALICE3 pipeline).
             % Centroids are stored in self.clusters as [N x 3] MR-space mm.
+            %
+            % Pipeline (mirrors 3dclustering.csh from ALICE3):
+            %   1. 3dclust on thresholded CT → labeled cluster volume + clst.1D
+            %   2. Resample to 0.5mm + erode/dilate + re-cluster (separates
+            %      clusters that touch at CT resolution)
+            %   3. Parse clst.1D for centroids in CT RAI mm space
+            %   4. xfm_leads to transform centroids to MR space via AFNI
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
@@ -588,42 +607,104 @@ classdef electrodeLocalizer < handle
                 return;
             end
 
-            fprintf('[Stage 6] Detecting electrode clusters in CT...\n');
+            fprintf('[Stage 6] Detecting electrode clusters via AFNI 3dclust...\n');
 
-            % Load coregistration transform
-            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform_spm.mat');
+            % Load the AFNI transform path saved by coregisterCT
+            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             assert(exist(xfmFile, 'file') == 2, ...
                 '[electrodeLocalizer] Run coregisterCT before detectElectrodes.');
-            S = load(xfmFile, 'M_ct2mr');
+            S = load(xfmFile, 'aff1D');
+            aff1D = S.aff1D;
 
-            % Load CT volume
-            ctNii = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
-            V  = spm_vol(ctNii);
-            ct = spm_read_vols(V);
+            % Verify the .aff12.1D file still exists; fall back to glob search
+            if exist(aff1D, 'file') ~= 2
+                hits = dir(fullfile(self.locDirs.ct_1_xfm, 'full_*.aff12.1D'));
+                assert(~isempty(hits), ...
+                    '[Stage 6] AFNI transform (.aff12.1D) not found. Re-run coregisterCT.');
+                aff1D = fullfile(self.locDirs.ct_1_xfm, hits(1).name);
+                fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
+            end
 
-            % Threshold and connected-component analysis
-            mask = ct >= electrodeLocalizer.CT_HU_THRESHOLD;
-            CC   = bwconncomp(mask, 26);   % 26-connectivity in 3D
-            stats = regionprops3(CC, 'Centroid', 'Volume');
+            % CT BRIK created by align.sh (3dresample -orient RAI)
+            workDir = self.locDirs.ct_1_xfm;
+            ctBrik  = fullfile(workDir, 'ct_implant+orig');
+            assert(exist([ctBrik '.BRIK'], 'file') == 2, ...
+                '[Stage 6] CT BRIK not found: %s.BRIK\n  Re-run coregisterCT.', ctBrik);
 
-            % Filter by voxel count
-            keep = stats.Volume >= electrodeLocalizer.MIN_CLUSTER_VOXELS & ...
-                   stats.Volume <= electrodeLocalizer.MAX_CLUSTER_VOXELS;
-            centroids_vox = stats.Centroid(keep, :);   % [N x 3] voxel indices
+            % Ensure AFNI tools are on PATH
+            setenv('PATH', [getenv('PATH') ':' self.afniBin]);
 
-            fprintf('[Stage 6] Found %d candidate electrode clusters.\n', sum(keep));
+            % Clustering subdirectory
+            clustDir = fullfile(workDir, 'clustering');
+            if ~exist(clustDir, 'dir'), mkdir(clustDir); end
 
-            % Convert CT voxel centroids directly to MRI RAS mm.
-            % M_ct2mr = spm_matrix(x) * VG.mat already encodes the full
-            % CT-vox → MRI-world chain, so no intermediate step needed.
-            N   = size(centroids_vox, 1);
-            hom = [centroids_vox'; ones(1, N)];   % 4 x N homogeneous
-            mr_world    = S.M_ct2mr * hom;        % MRI RAS mm (4 x N)
-            clusters_mm = mr_world(1:3, :)';      % N x 3
+            % Parameters (from 3dclustering.csh defaults)
+            rmm  = electrodeLocalizer.AFNI_CLUSTER_RMM;   % neighbor dist in mm
+            vmul = electrodeLocalizer.AFNI_CLUSTER_VMUL;  % min volume in µl
+            cv   = electrodeLocalizer.CT_HU_THRESHOLD;    % clip threshold (HU)
+
+            outNii = sprintf('3dclusters_r%d_is%d_thr%d.nii', rmm, vmul, cv);
+            outFull = fullfile(clustDir, outNii);
+            clst1D  = fullfile(clustDir, 'clst.1D');
+
+            fprintf('[Stage 6] Parameters: rmm=%dmm, vmul=%dµl, threshold=%dHU\n', ...
+                rmm, vmul, cv);
+
+            % Step 1: initial 3dclust on CT BRIK
+            cmd1 = sprintf( ...
+                '3dclust -savemask "%s" -overwrite -1Dformat -1clip %d %d %d "%s" > "%s"', ...
+                outFull, cv, rmm, vmul, ctBrik, clst1D);
+            [status, txt] = unix(sprintf('cd "%s" && %s', clustDir, cmd1));
+            if status ~= 0
+                fprintf('%s\n', txt);
+                error('[Stage 6] 3dclust (step 1) failed (exit %d).', status);
+            end
+
+            % Step 2: resample to 0.5mm isotropic, erode -1 then dilate +2,
+            %         and re-cluster — separates clusters that touch at CT res.
+            tmpRs = 'temp_clusts_rs0.5';
+            tmpDe = 'temp_clusts_rs0.5_de2';
+
+            cmd2 = sprintf( ...
+                '3dresample -prefix "%s" -overwrite -rmode NN -dxyz 0.5 0.5 0.5 -inset "%s"', ...
+                tmpRs, outFull);
+            cmd3 = sprintf( ...
+                '3dmask_tool -dilate_inputs -1 +2 -prefix "%s" -overwrite -inputs "%s+orig"', ...
+                tmpDe, tmpRs);
+            cmd4 = sprintf( ...
+                '3dclust -savemask "%s" -overwrite -1Dformat -1clip %d %d %d "%s+orig" > "%s"', ...
+                outFull, cv, rmm, vmul, tmpDe, clst1D);
+            cleanup = sprintf('rm -f "%s+orig.HEAD" "%s+orig.BRIK" "%s+orig.HEAD" "%s+orig.BRIK"', ...
+                tmpRs, tmpRs, tmpDe, tmpDe);
+
+            for cmdCell = {cmd2, cmd3, cmd4, cleanup}
+                [status, txt] = unix(sprintf('cd "%s" && %s', clustDir, cmdCell{1}));
+                if status ~= 0 && ~contains(cmdCell{1}, 'rm')
+                    fprintf('%s\n', txt);
+                    warning('[Stage 6] AFNI step returned non-zero exit: %s', cmdCell{1}(1:min(60,end)));
+                end
+            end
+
+            % Step 3: parse clst.1D for cluster centroids (CT RAI mm)
+            centroids_ct = electrodeLocalizer.parseClst1D(clst1D);
+            N = size(centroids_ct, 1);
+            fprintf('[Stage 6] Found %d electrode clusters.\n', N);
+            assert(N > 0, ...
+                '[Stage 6] No clusters found. Check CT_HU_THRESHOLD (%d HU) or CT file.', cv);
+
+            % Step 4: transform CT RAI mm → MR space via xfm_leads
+            % (uses @ElectroGrid + ConvertSurface from AFNI, same pipeline as ALICE3)
+            chanNums  = arrayfun(@(i) sprintf('e%03d',i), (1:N)', 'UniformOutput', false);
+            ct_coords = table(chanNums, ...
+                centroids_ct(:,1), centroids_ct(:,2), centroids_ct(:,3), ...
+                'VariableNames', {'chanName','x','y','z'});
+
+            mr_coords = xfm_leads(ct_coords, aff1D, ctBrik, 'RAI', clustDir);
+            clusters_mm = mr_coords{:, {'x','y','z'}};
 
             self.clusters = clusters_mm;
             save(clustFile, 'clusters_mm');
-            fprintf('[Stage 6] Cluster centroids saved to %s\n', clustFile);
+            fprintf('[Stage 6] %d cluster centroids saved to %s\n', N, clustFile);
         end
 
         % -----------------------------------------------------------------
@@ -631,12 +712,14 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function namingGUI(self)
-            % Display detected clusters on the pial surface and let the
-            % user name each contact, specify depth vs subdural, or mark
-            % it as artifact.
+            % Single-window electrode naming GUI.
             %
-            % Results stored in self.leads as a table with columns:
-            %   chanName, x, y, z, type ('depth' | 'subdural')
+            % Left panel  : rotatable 3-D brain with all clusters plotted.
+            %               Drag to rotate at any time — no dialogs block it.
+            % Right panel : channel list, free-text field, type selector,
+            %               Confirm / Artifact / Back / Finish buttons.
+            %
+            % Results stored in self.leads (chanName, x, y, z, type).
 
             assert(~isempty(self.clusters), ...
                 '[electrodeLocalizer] Run detectElectrodes before namingGUI.');
@@ -644,175 +727,216 @@ classdef electrodeLocalizer < handle
             N = size(self.clusters, 1);
             fprintf('[Stage 7] Launching electrode naming GUI (%d clusters)...\n', N);
 
-            % Load pial surface for display (use lh for visual context;
-            % both hemispheres are plotted together)
             sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
             lhFile  = fullfile(sumaDir, 'lh.pial.gii');
             rhFile  = fullfile(sumaDir, 'rh.pial.gii');
-            lhSurf  = gifti(lhFile);
-            rhSurf  = gifti(rhFile);
+            assert(exist(lhFile,'file')==2 && exist(rhFile,'file')==2, ...
+                '[electrodeLocalizer] SUMA pial .gii not found; re-run Stage 4.');
+            lhSurf = gifti(lhFile);
+            rhSurf = gifti(rhFile);
 
-            % Open 3-D figure
+            % ---- mutable state shared by callbacks (closures) ----
+            k          = 1;
+            nameOut    = cell(N, 1);
+            typeOut    = cell(N, 1);
+            artifact   = false(N, 1);
+
+            % ---- figure ----
             fig = figure('Name', sprintf('Electrode Naming — %s', self.subj), ...
-                         'NumberTitle', 'off', 'Color', 'k');
-            ax  = axes('Parent', fig, 'Color', 'k');
-            hold(ax, 'on'); axis(ax, 'equal'); axis(ax, 'off');
-            view(ax, 3);
-            camlight(ax, 'headlight');
-            material(ax, 'dull');
+                'NumberTitle', 'off', 'Color', [0.12 0.12 0.12], ...
+                'Position', [50 50 1400 820], ...
+                'CloseRequestFcn', @cbClose);
 
-            % Plot pial surfaces
+            % left: 3-D brain axes (63% width, full height)
+            ax = axes('Parent', fig, 'Position', [0.01 0.01 0.62 0.97], ...
+                'Color', 'k', 'XColor', 'none', 'YColor', 'none', 'ZColor', 'none');
+            hold(ax,'on'); axis(ax,'equal'); axis(ax,'off');
+            view(ax,3); camlight(ax,'headlight'); material(ax,'dull');
+
             patch(ax, 'Faces', lhSurf.faces, 'Vertices', lhSurf.vertices, ...
                 'FaceColor', [0.75 0.70 0.65], 'EdgeColor', 'none', ...
-                'FaceAlpha', 0.4);
+                'FaceAlpha', 0.4, 'PickableParts', 'none', 'HitTest', 'off');
             patch(ax, 'Faces', rhSurf.faces, 'Vertices', rhSurf.vertices, ...
                 'FaceColor', [0.75 0.70 0.65], 'EdgeColor', 'none', ...
-                'FaceAlpha', 0.4);
+                'FaceAlpha', 0.4, 'PickableParts', 'none', 'HitTest', 'off');
 
-            % Plot all clusters as grey dots with index labels
-            scatter3(ax, self.clusters(:,1), self.clusters(:,2), self.clusters(:,3), ...
-                60, repmat([0.5 0.5 0.5], N, 1), 'filled');
-            for k = 1:N
-                text(ax, self.clusters(k,1), self.clusters(k,2), self.clusters(k,3), ...
-                    sprintf('  %d', k), 'Color', 'w', 'FontSize', 8);
-            end
-            title(ax, sprintf('%s — %d clusters detected', self.subj, N), ...
-                'Color', 'w', 'FontSize', 11);
+            dotColors = repmat([0.45 0.45 0.45], N, 1);
+            hDots = scatter3(ax, self.clusters(:,1), self.clusters(:,2), ...
+                self.clusters(:,3), 50, dotColors, 'filled', 'HitTest', 'off');
+            hHi  = scatter3(ax, NaN, NaN, NaN, 140, [1 0.8 0], 'filled', ...
+                'MarkerEdgeColor', 'w', 'LineWidth', 1.5, 'HitTest', 'off');
 
-            % Initialise output table
-            chanNames_out = cell(N, 1);
-            types_out     = cell(N, 1);
-            isArtifact    = false(N, 1);
-            highlight     = [];   % handle to highlighted scatter point
+            rotate3d(ax, 'on');   % always-on rotation — drag to rotate
 
-            % Iterate over clusters
-            k = 1;
-            while k <= N
+            % ---- right panel controls ----
+            bg  = [0.18 0.18 0.18];
+            fg  = [0.92 0.92 0.92];
+            x0  = 0.645;   w = 0.345;
 
-                % Highlight the current cluster
-                delete(highlight);
-                highlight = scatter3(ax, ...
-                    self.clusters(k,1), self.clusters(k,2), self.clusters(k,3), ...
-                    120, [1 0.8 0], 'filled', 'MarkerEdgeColor', 'w');
-                drawnow;
+            hInfo = uicontrol(fig, 'Style', 'text', ...
+                'Units','normalized','Position',[x0 0.88 w 0.10], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',13,'FontWeight','bold','HorizontalAlignment','center');
 
-                % Build dialog
-                prompt    = {sprintf('Cluster %d of %d  (xyz: %.1f %.1f %.1f)\n\nChannel name:', ...
-                                k, N, self.clusters(k,:))};
-                dlgTitle  = 'Name this electrode';
-                defaults  = {''};
+            hXYZ = uicontrol(fig, 'Style', 'text', ...
+                'Units','normalized','Position',[x0 0.83 w 0.05], ...
+                'BackgroundColor',bg,'ForegroundColor',[0.5 0.8 1.0], ...
+                'FontSize',10,'HorizontalAlignment','center');
 
-                % If chanNames available, offer a listdlg first
+            uicontrol(fig,'Style','text','String','Channel name:', ...
+                'Units','normalized','Position',[x0 0.79 w 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+
+            hList = uicontrol(fig, 'Style', 'listbox', ...
+                'Units','normalized','Position',[x0 0.52 w 0.27], ...
+                'BackgroundColor',[0.22 0.22 0.22],'ForegroundColor',fg, ...
+                'FontSize',11,'String',{});
+
+            uicontrol(fig,'Style','text','String','Or type name:', ...
+                'Units','normalized','Position',[x0 0.47 w 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+
+            hEdit = uicontrol(fig, 'Style', 'edit', ...
+                'Units','normalized','Position',[x0 0.42 w 0.05], ...
+                'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
+                'FontSize',11,'HorizontalAlignment','left','String','');
+
+            uicontrol(fig,'Style','text','String','Electrode type:', ...
+                'Units','normalized','Position',[x0 0.37 w 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+
+            hType = uicontrol(fig, 'Style', 'popupmenu', ...
+                'Units','normalized','Position',[x0 0.32 w 0.05], ...
+                'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
+                'FontSize',11,'String',{'depth','subdural'},'Value',1);
+
+            uicontrol(fig,'Style','pushbutton', ...
+                'String','Confirm & Next  >', ...
+                'Units','normalized','Position',[x0 0.24 w 0.07], ...
+                'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
+                'FontSize',12,'FontWeight','bold','Callback',@cbConfirm);
+
+            uicontrol(fig,'Style','pushbutton', ...
+                'String','Mark as Artifact', ...
+                'Units','normalized','Position',[x0 0.16 w 0.07], ...
+                'BackgroundColor',[0.48 0.18 0.18],'ForegroundColor','w', ...
+                'FontSize',12,'Callback',@cbArtifact);
+
+            uicontrol(fig,'Style','pushbutton','String','< Back', ...
+                'Units','normalized','Position',[x0 0.08 w*0.44 0.07], ...
+                'BackgroundColor',[0.30 0.30 0.30],'ForegroundColor',fg, ...
+                'FontSize',11,'Callback',@cbBack);
+
+            uicontrol(fig,'Style','pushbutton','String','Finish', ...
+                'Units','normalized','Position',[x0+w*0.56 0.08 w*0.44 0.07], ...
+                'BackgroundColor',[0.20 0.38 0.58],'ForegroundColor','w', ...
+                'FontSize',11,'FontWeight','bold','Callback',@cbFinish);
+
+            uicontrol(fig,'Style','text', ...
+                'String','Drag on brain to rotate at any time', ...
+                'Units','normalized','Position',[x0 0.02 w 0.05], ...
+                'BackgroundColor',bg,'ForegroundColor',[0.50 0.50 0.50], ...
+                'FontSize',9,'HorizontalAlignment','center');
+
+            refreshDisplay();
+            waitfor(fig);   % non-blocking for controls; blocks here until closed
+
+            % ---- build leads table after GUI closes ----
+            valid    = ~artifact & ~cellfun(@isempty, nameOut);
+            nameOut  = nameOut(valid);
+            typeOut  = typeOut(valid);
+            xyz      = self.clusters(valid, :);
+            self.leads = table(nameOut, xyz(:,1), xyz(:,2), xyz(:,3), typeOut, ...
+                'VariableNames', {'chanName','x','y','z','type'});
+            fprintf('[Stage 7] %d contacts accepted, %d artifacts.\n', ...
+                sum(valid), sum(artifact));
+
+            % ---- nested callbacks (share k, nameOut, etc. by closure) ----
+
+            function refreshDisplay()
+                if ~ishandle(fig), return; end
+                set(hInfo, 'String', sprintf('Cluster  %d  /  %d', k, N));
+                set(hXYZ,  'String', sprintf('x=%.1f   y=%.1f   z=%.1f', ...
+                    self.clusters(k,:)));
+                set(hHi, 'XData', self.clusters(k,1), ...
+                         'YData', self.clusters(k,2), ...
+                         'ZData', self.clusters(k,3));
+
+                % List box: remaining (unassigned) channel names
+                used = nameOut(~cellfun(@isempty, nameOut));
                 if ~isempty(self.chanNames)
-                    remaining = setdiff(self.chanNames, chanNames_out, 'stable');
-                    choices   = [remaining; {'[artifact — skip]'}; {'[free text]'}];
-                    [sel, ok] = listdlg( ...
-                        'ListString',   choices, ...
-                        'SelectionMode','single', ...
-                        'Name',         sprintf('Cluster %d / %d', k, N), ...
-                        'PromptString', sprintf('xyz: %.1f  %.1f  %.1f', ...
-                                                self.clusters(k,:)));
-                    if ~ok
-                        % User closed dialog — offer to go back or quit
-                        choice = questdlg('Continue or go back?', '', ...
-                            'Go back', 'Skip cluster', 'Quit naming', 'Go back');
-                        switch choice
-                            case 'Go back'
-                                k = max(1, k-1);
-                                continue;
-                            case 'Skip cluster'
-                                isArtifact(k) = true;
-                                k = k + 1;
-                                continue;
-                            case 'Quit naming'
-                                break;
-                            otherwise
-                                break;
-                        end
-                    end
-
-                    selected = choices{sel};
-                    if strcmp(selected, '[artifact — skip]')
-                        isArtifact(k) = true;
-                        k = k + 1;
-                        continue;
-                    elseif strcmp(selected, '[free text]')
-                        answer = inputdlg(prompt, dlgTitle, 1, defaults);
-                        if isempty(answer) || isempty(strtrim(answer{1}))
-                            isArtifact(k) = true;
-                            k = k + 1;
-                            continue;
-                        end
-                        chanName = strtrim(answer{1});
-                    else
-                        chanName = selected;
-                    end
-
+                    remaining = self.chanNames(~ismember(self.chanNames, used));
+                    set(hList, 'String', remaining(:), ...
+                        'Value', max(1, min(get(hList,'Value'), numel(remaining))));
                 else
-                    % No chanNames — free text only
-                    choices = {'[artifact — skip]'; '[free text]'};
-                    [sel, ok] = listdlg( ...
-                        'ListString',   choices, ...
-                        'SelectionMode','single', ...
-                        'Name',         sprintf('Cluster %d / %d', k, N), ...
-                        'PromptString', sprintf('xyz: %.1f  %.1f  %.1f', ...
-                                                self.clusters(k,:)));
-                    if ~ok || sel == 2
-                        answer = inputdlg(prompt, dlgTitle, 1, defaults);
-                        if isempty(answer) || isempty(strtrim(answer{1}))
-                            isArtifact(k) = true;
-                            k = k + 1;
-                            continue;
-                        end
-                        chanName = strtrim(answer{1});
-                    else
-                        isArtifact(k) = true;
-                        k = k + 1;
-                        continue;
-                    end
+                    set(hList, 'String', {});
                 end
 
-                % Ask depth vs subdural
-                typeChoice = questdlg( ...
-                    sprintf('%s — electrode type?', chanName), ...
-                    'Electrode type', 'depth', 'subdural', 'depth');
-                if isempty(typeChoice)
-                    typeChoice = 'depth';
+                % Restore prior entry when navigating back
+                set(hEdit, 'String', '');
+                if ~isempty(nameOut{k})
+                    set(hEdit, 'String', nameOut{k});
                 end
-
-                chanNames_out{k} = chanName;
-                types_out{k}     = typeChoice;
-
-                % Update scatter colour: depth=blue, subdural=green
-                if strcmp(typeChoice, 'depth')
-                    col = [0.3 0.6 1.0];
-                else
-                    col = [0.3 1.0 0.5];
+                typeStrs = get(hType, 'String');
+                if ~isempty(typeOut{k})
+                    idx = find(strcmp(typeStrs, typeOut{k}), 1);
+                    if ~isempty(idx), set(hType, 'Value', idx); end
                 end
-                scatter3(ax, self.clusters(k,1), self.clusters(k,2), self.clusters(k,3), ...
-                    60, col, 'filled');
-                text(ax, self.clusters(k,1), self.clusters(k,2), self.clusters(k,3), ...
-                    sprintf('  %s', chanName), 'Color', 'w', 'FontSize', 7);
                 drawnow;
-
-                k = k + 1;
             end
 
-            delete(highlight);
+            function name = resolvedName()
+                name = strtrim(get(hEdit, 'String'));
+                if ~isempty(name), return; end
+                listStr = get(hList, 'String');
+                if ~isempty(listStr)
+                    name = listStr{max(1, get(hList,'Value'))};
+                end
+            end
 
-            % Collect non-artifact entries
-            valid     = ~isArtifact & ~cellfun(@isempty, chanNames_out);
-            chanNames_out = chanNames_out(valid);
-            types_out     = types_out(valid);
-            xyz_valid     = self.clusters(valid, :);
+            function cbConfirm(~,~)
+                name = resolvedName();
+                if isempty(name)
+                    msgbox('Enter a channel name or use Mark as Artifact.','','warn');
+                    return;
+                end
+                typeStrs    = get(hType,'String');
+                nameOut{k}  = name;
+                typeOut{k}  = typeStrs{get(hType,'Value')};
+                artifact(k) = false;
+                c = get(hDots,'CData');
+                if strcmp(typeOut{k},'depth'), col=[0.3 0.6 1.0]; else, col=[0.3 1.0 0.5]; end
+                c(k,:) = col;
+                set(hDots,'CData',c);
+                if k < N, k = k+1; end
+                refreshDisplay();
+            end
 
-            self.leads = table(chanNames_out, ...
-                               xyz_valid(:,1), xyz_valid(:,2), xyz_valid(:,3), ...
-                               types_out, ...
-                               'VariableNames', {'chanName','x','y','z','type'});
+            function cbArtifact(~,~)
+                artifact(k) = true;
+                nameOut{k}  = '';
+                typeOut{k}  = '';
+                c = get(hDots,'CData'); c(k,:)=[0.6 0.2 0.2]; set(hDots,'CData',c);
+                if k < N, k = k+1; end
+                refreshDisplay();
+            end
 
-            fprintf('[Stage 7] Naming complete: %d contacts accepted, %d marked as artifact.\n', ...
-                sum(valid), sum(isArtifact));
+            function cbBack(~,~)
+                if k > 1, k = k-1; end
+                refreshDisplay();
+            end
+
+            function cbFinish(~,~)
+                delete(fig);
+            end
+
+            function cbClose(~,~)
+                delete(fig);
+            end
+
         end
 
         % -----------------------------------------------------------------
@@ -1009,6 +1133,37 @@ classdef electrodeLocalizer < handle
             catch e
                 error('[electrodeLocalizer] Could not load gifti file %s: %s', ...
                     filepath, e.message);
+            end
+        end
+
+        function centroids = parseClst1D(clst1DPath)
+            % Parse AFNI 3dclust -1Dformat output and return cluster centroids.
+            %
+            % Returns [N x 3] matrix of centroid coordinates in CT RAI mm
+            % (CM_LR, CM_AP, CM_IS — columns 2, 3, 4 of each data row).
+
+            fid = fopen(clst1DPath, 'r');
+            assert(fid > 0, '[electrodeLocalizer] Cannot open %s', clst1DPath);
+            lines = {};
+            while ~feof(fid)
+                ln = strtrim(fgetl(fid));
+                if ischar(ln) && ~isempty(ln) && ln(1) ~= '#'
+                    lines{end+1} = ln; %#ok<AGROW>
+                end
+            end
+            fclose(fid);
+
+            if isempty(lines)
+                centroids = zeros(0, 3);
+                return;
+            end
+
+            % Each data row: rank  CM_LR  CM_AP  CM_IS  minRL ...
+            % Columns 2, 3, 4 (1-indexed) are the RAI mm centroids.
+            centroids = zeros(numel(lines), 3);
+            for i = 1:numel(lines)
+                vals = sscanf(lines{i}, '%f');
+                centroids(i, :) = vals(2:4)';
             end
         end
 

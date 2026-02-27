@@ -57,10 +57,9 @@ For electrodeLocalizer (electrode localization from imaging)
 ------------------------------------------------------------
 - FreeSurfer  — cortical surface reconstruction (recon-all)
                 https://surfer.nmr.mgh.harvard.edu
-- AFNI/SUMA   — standard surface mesh generation (@SUMA_Make_Spec_FS)
+- AFNI/SUMA   — CT-to-MR coregistration (align.sh) and standard surface
+                mesh generation (@SUMA_Make_Spec_FS)
                 https://afni.nimh.nih.gov
-- SPM         — CT-to-MR coregistration (spm_coreg); must be on MATLAB path
-                https://www.fil.ion.ucl.ac.uk/spm/
 - gifti toolbox — bundled in Utilities/eeg_toolbox/localize/zLocalize/packages/
 
 Note: FreeSurfer and AFNI are invoked automatically from within MATLAB via
@@ -104,10 +103,9 @@ leads.csv must contain columns: chanName, x, y, z
 QUICK START
 --------------------------------------------------------------------------------
 
-Step 1 — Navigate to the diamondToolbox root directory in MATLAB:
+Step 1 — Add diamondToolbox to the MATLAB path (working directory can be anywhere):
 
-      cd /path/to/diamondToolbox
-      % (the constructor enforces this)
+      addpath(genpath('/path/to/diamondToolbox'))
 
 Step 2 — Construct a sourceLocalizer object:
 
@@ -184,16 +182,19 @@ is safe to interrupt and resume.
                                (~6–10 hours, runs unattended)
   Stage 4  runSuma             AFNI/SUMA standard ld141 mesh → gifti files
                                (198,812 vertices per hemisphere)
-  Stage 5  coregisterCT        SPM rigid-body CT-to-MR coregistration via
-                               normalised mutual information (spm_coreg)
+  Stage 5  coregisterCT        AFNI rigid-body CT-to-MR coregistration via
+                               align.sh (centers volumes, then affine alignment
+                               using align_epi_anat.py with lpc cost function)
   Stage 6  detectElectrodes    Threshold CT volume + connected-component
                                analysis to find electrode clusters; centroids
                                converted to MRI RAS mm coordinates
-  Stage 7  namingGUI           Interactive 3-D figure: detected clusters
-                               displayed on pial surface; user names each
-                               contact, labels it depth or subdural, or marks
-                               it as artifact. If chanNames was provided, a
-                               dropdown of remaining channel names is offered.
+  Stage 7  namingGUI           Single-window interactive GUI: rotatable 3-D
+                               brain on the left, controls on the right.
+                               User names each cluster from a channel list or
+                               free-text field, selects depth vs subdural, or
+                               marks it as artifact. Back/Finish buttons allow
+                               free navigation. Brain can be rotated at any
+                               time by dragging.
   Stage 8  projectElectrodes   Subdural contacts snapped to nearest vertex on
                                the pial-outer-smoothed surface (brain-shift
                                correction). Depth contacts retain their
