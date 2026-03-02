@@ -126,11 +126,10 @@ echo ""
 
 xfm_af=${dset_ct}${suffix}_mat.aff12.1D
 xfm_full=full_${xfm_af}
-cmd="cat_matvec -ONELINE $xfm_af $xfm_shft > $xfm_full"
 echo ""
-echo $cmd
+echo "cat_matvec -ONELINE $xfm_af $xfm_shft > $xfm_full"
 echo ""
-[ "$run" = 1 ] && $cmd
+[ "$run" = 1 ] && cat_matvec -ONELINE "$xfm_af" "$xfm_shft" > "$xfm_full"
 
 
 cd $old_dir

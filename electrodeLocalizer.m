@@ -1,4 +1,3 @@
-
 classdef electrodeLocalizer < handle
 % electrodeLocalizer  Localizes implanted electrodes from pre-op MRI and
 % post-op CT, producing a leads.csv and cortical surface files that
@@ -53,10 +52,24 @@ classdef electrodeLocalizer < handle
     end
 
     properties (Constant)
-        CT_HU_THRESHOLD   = 1500;  % HU threshold for electrode detection (Hounsfield units)
-        AFNI_CLUSTER_RMM  = 1;     % 3dclust: max neighbor distance in mm (rmm)
-        AFNI_CLUSTER_VMUL = 10;    % 3dclust: minimum cluster volume in µl (vmul)
-        AFNI_BIN_DEFAULT  = fullfile(char(java.lang.System.getProperty('user.home')), 'abin');
+        CT_HU_THRESHOLD          = 2500;  % HU threshold for electrode detection (Hounsfield units)
+                                         %   1500: skull forms one huge connected blob (293K voxels)
+                                         %         that swallows top-of-head contacts via guide bolts
+                                         %   2000: skull separates but contact blooms touch/merge on
+                                         %         close-spaced oblique shanks → fuses entire shank
+                                         %   2500: good balance; micro-contact oblique shanks still
+                                         %         merge (sub-voxel gap, CT resolution limit) but
+                                         %         all other contacts resolve individually
+        AFNI_CLUSTER_RMM         = 1;     % 3dclust: max neighbor distance in mm (rmm)
+        AFNI_CLUSTER_VMUL        = 3;     % 3dclust: minimum cluster volume in µl (vmul)
+        AFNI_CLUSTER_MAX_UL      = 1000;  % max cluster volume in µl; skull blob ~15,000 µl,
+                                         %   guide bolts ~1,400 µl; contacts 5–50 µl
+        SURFACE_PROXIMITY_MAX_MM = 40;    % max distance (mm) from pial surface to keep a cluster
+        AFNI_MORPH_EROSION_ITER  = 3;    % morphological erosion iterations before clustering
+                                         %   (each iter ≈ 1 voxel; 3 iters ≈ 1.25 mm at 0.415 mm CT)
+                                         %   separates adjacent-contact blooms without destroying contacts
+        AFNI_CLUSTER_VMUL_ERODED = 2;    % min cluster volume (µl) after erosion (contacts shrink ~10×)
+        AFNI_BIN_DEFAULT         = fullfile(char(java.lang.System.getProperty('user.home')), 'abin');
     end
 
     properties (Hidden = true)
@@ -549,10 +562,27 @@ classdef electrodeLocalizer < handle
                 '[electrodeLocalizer] align.sh not found at: %s', alignScript);
 
             workDir = self.locDirs.ct_1_xfm;
-            % Copy inputs to work dir so align.sh can find them by stem
+            % Copy inputs to work dir so align.sh can find them by stem.
+            % Pre-orient the MR NIfTI to RAI before align.sh runs.
+            % align.sh calls "3dWarp -deoblique" which has no -overwrite flag
+            % and, when applied to an RSP-oriented NIfTI with negative deltas,
+            % shifts the physical coordinate origin relative to orig.mgz/SUMA
+            % space (causing a systematic ~20-35 mm electrode displacement).
+            % Pre-reorienting to RAI with 3dresample makes 3dWarp a no-op,
+            % keeping the coordinate frame consistent with the SUMA surfaces.
             mrWork = fullfile(workDir, 'mr_pre.nii');
             ctWork = fullfile(workDir, 'ct_implant.nii');
-            if exist(mrWork,'file') ~= 2, copyfile(mrNii, mrWork); end
+            if exist(mrWork, 'file') ~= 2
+                fprintf('[Stage 5] Resampling MR to RAI orientation for AFNI registration...\n');
+                cmd = sprintf('"%s" -orient RAI -inset "%s" -prefix "%s" -overwrite', ...
+                    fullfile(self.afniBin, '3dresample'), mrNii, mrWork);
+                [cst, ctx] = unix(cmd);
+                if cst ~= 0
+                    fprintf('%s\n', ctx);
+                    fprintf('[Stage 5] 3dresample failed; copying mr_pre.nii directly.\n');
+                    copyfile(mrNii, mrWork);
+                end
+            end
             if exist(ctWork,'file') ~= 2, copyfile(ctNii, ctWork); end
 
             setenv('PATH', [getenv('PATH') ':' self.afniBin]);
@@ -562,37 +592,54 @@ classdef electrodeLocalizer < handle
             % the actual alignment finishes; skipping avoids repeated hangs.
             hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
             if isempty(hits)
-                fprintf('[Stage 5] Running align.sh (this may take several minutes)...\n');
-                cmd = sprintf('bash "%s" mr_pre ct_implant "%s"', alignScript, workDir);
-                [status, txt] = unix(cmd);
-                if status ~= 0
-                    fprintf('%s\n', txt);
-                    % Non-zero exit may reflect a 3dNotes hang (not a fatal error).
-                    % Fall through and check whether the key outputs were created.
-                    fprintf('[Stage 5] align.sh exited %d — checking for outputs...\n', status);
+                % Delete stale align.sh intermediates so a retry runs clean.
+                % align.sh tools (3dWarp, 3dAutomask, @Align_Centers, etc.)
+                % don't accept -overwrite and will silently skip or error on
+                % existing files, causing align_epi_anat.py to run on stale data.
+                stale = [dir(fullfile(workDir, 'mr_pre_do*')); ...
+                         dir(fullfile(workDir, 'ct_implant_shft*')); ...
+                         dir(fullfile(workDir, 'ct_implant_sh2*')); ...
+                         dir(fullfile(workDir, '__tt_*')); ...
+                         dir(fullfile(workDir, '*_mat.aff12.1D'))];
+                for si = 1:numel(stale)
+                    delete(fullfile(stale(si).folder, stale(si).name));
                 end
 
-                % align_epi_anat.py may have succeeded even if align.sh exit was
-                % non-zero (e.g. 3dNotes hanging at the end).  If the per-step
-                % affine exists but the combined transform does not, run cat_matvec.
-                hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
-                if isempty(hits)
-                    % Try to build the full transform from the per-step files.
-                    xfmAf   = dir(fullfile(workDir, '*_XFMTO_lpc_*_mat.aff12.1D'));
-                    xfmShft = fullfile(workDir, 'ct_implant_shft.1D');
-                    if ~isempty(xfmAf) && exist(xfmShft,'file') == 2
-                        xfmAfPath  = fullfile(workDir, xfmAf(1).name);
-                        xfmFullName = ['full_' xfmAf(1).name];
-                        xfmFullPath = fullfile(workDir, xfmFullName);
-                        fprintf('[Stage 5] Running cat_matvec to combine transforms...\n');
-                        catCmd = sprintf('cat_matvec -ONELINE "%s" "%s" > "%s"', ...
-                            xfmAfPath, xfmShft, xfmFullPath);
-                        [cstatus, ctxt] = unix(catCmd);
-                        if cstatus ~= 0
-                            fprintf('%s\n', ctxt);
-                        end
-                        hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+                % Run align.sh in the background so the known 3dNotes hang
+                % (AFNI 26.x) does not block MATLAB indefinitely.
+                % align_epi_anat.py writes *_mat.aff12.1D BEFORE calling 3dNotes,
+                % so we poll for that file instead of waiting for shell exit.
+                logFile = fullfile(workDir, 'align_log.txt');
+                unix(sprintf('bash "%s" mr_pre ct_implant "%s" > "%s" 2>&1 &', ...
+                    alignScript, workDir, logFile));
+
+                fprintf('[Stage 5] Running align_epi_anat.py (polling every 15 s) .');
+                t0_align = tic; alignTimeout = 3600;
+                xfmAf   = []; xfmShft = fullfile(workDir, 'ct_implant_shft.1D');
+                while toc(t0_align) < alignTimeout
+                    xfmAf = dir(fullfile(workDir, '*_XFMTO_lpc_*_mat.aff12.1D'));
+                    if ~isempty(xfmAf) && exist(xfmShft, 'file') == 2
+                        break;
                     end
+                    pause(15);
+                    fprintf('.');
+                end
+                fprintf(' (%.0f min)\n', toc(t0_align)/60);
+
+                % Kill any hanging 3dNotes / align_epi_anat children.
+                unix('pkill -f "3dNotes" 2>/dev/null; pkill -f "align_epi_anat" 2>/dev/null');
+
+                % Build the combined transform from the per-step files.
+                hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+                if isempty(hits) && ~isempty(xfmAf) && exist(xfmShft,'file') == 2
+                    xfmAfPath   = fullfile(workDir, xfmAf(1).name);
+                    xfmFullPath = fullfile(workDir, ['full_' xfmAf(1).name]);
+                    fprintf('[Stage 5] Running cat_matvec to combine transforms...\n');
+                    catCmd = sprintf('cat_matvec -ONELINE "%s" "%s" > "%s"', ...
+                        xfmAfPath, xfmShft, xfmFullPath);
+                    [cstatus, ctxt] = unix(catCmd);
+                    if cstatus ~= 0, fprintf('%s\n', ctxt); end
+                    hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
                 end
 
                 assert(~isempty(hits), ...
@@ -613,15 +660,15 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function detectElectrodes(self, varargin)
-            % Detect electrode clusters using AFNI 3dclust (ALICE3 pipeline).
+            % Detect electrode contact positions on the co-registered CT BRIK.
             % Centroids are stored in self.clusters as [N x 3] MR-space mm.
             %
-            % Pipeline (mirrors 3dclustering.csh from ALICE3):
-            %   1. 3dclust on thresholded CT → labeled cluster volume + clst.1D
-            %   2. Resample to 0.5mm + erode/dilate + re-cluster (separates
-            %      clusters that touch at CT resolution)
-            %   3. Parse clst.1D for centroids in CT RAI mm space
-            %   4. xfm_leads to transform centroids to MR space via AFNI
+            % Pipeline:
+            %   1. 3dclust on raw CT at CT_HU_THRESHOLD → clusters + clst.1D
+            %      (skull forms one large separate cluster at 2000 HU — no masking needed)
+            %   2. Volume filter: remove clusters > AFNI_CLUSTER_MAX_UL (removes skull/hardware)
+            %   3. xfm_leads: transform CT centroids → MR space via AFNI
+            %   4. Proximity filter: drop clusters > SURFACE_PROXIMITY_MAX_MM from pial
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
@@ -669,57 +716,42 @@ classdef electrodeLocalizer < handle
             clustDir = fullfile(workDir, 'clustering');
             if ~exist(clustDir, 'dir'), mkdir(clustDir); end
 
-            % Parameters (from 3dclustering.csh defaults)
-            rmm  = electrodeLocalizer.AFNI_CLUSTER_RMM;   % neighbor dist in mm
-            vmul = electrodeLocalizer.AFNI_CLUSTER_VMUL;  % min volume in µl
-            cv   = electrodeLocalizer.CT_HU_THRESHOLD;    % clip threshold (HU)
+            % Parameters
+            rmm  = electrodeLocalizer.AFNI_CLUSTER_RMM;          % neighbor dist in mm
+            vmul = electrodeLocalizer.AFNI_CLUSTER_VMUL_ERODED;  % min volume (µl) — small for high-HU blobs
+            cv   = electrodeLocalizer.CT_HU_THRESHOLD;            % HU threshold
 
-            outNii = sprintf('3dclusters_r%d_is%d_thr%d.nii', rmm, vmul, cv);
+            outNii  = sprintf('3dclusters_r%d_is%d_thr%d.nii', rmm, vmul, cv);
             outFull = fullfile(clustDir, outNii);
             clst1D  = fullfile(clustDir, 'clst.1D');
 
-            fprintf('[Stage 6] Parameters: rmm=%dmm, vmul=%dµl, threshold=%dHU\n', ...
-                rmm, vmul, cv);
+            fprintf('[Stage 6] Parameters: rmm=%dmm, vmul=%dµl, threshold=%dHU\n', rmm, vmul, cv);
 
-            % Step 1: initial 3dclust on CT BRIK
+            % Run 3dclust directly on the raw CT (no skull masking).
+            % At 2000 HU the skull forms one enormous cluster (~15,000 µl) that is
+            % removed by AFNI_CLUSTER_MAX_UL.  Skull masking was tried but the
+            % skull-stripped brain mask doesn't cover the superior brain apex, so
+            % it zeroes out top-of-head contacts — causing them to go undetected.
             cmd1 = sprintf( ...
                 '3dclust -savemask "%s" -overwrite -1Dformat -1clip %d %d %d "%s" > "%s"', ...
                 outFull, cv, rmm, vmul, ctBrik, clst1D);
             [status, txt] = unix(sprintf('cd "%s" && %s', clustDir, cmd1));
             if status ~= 0
                 fprintf('%s\n', txt);
-                error('[Stage 6] 3dclust (step 1) failed (exit %d).', status);
+                error('[Stage 6] 3dclust failed (exit %d).', status);
             end
 
-            % Step 2: resample to 0.5mm isotropic, erode -1 then dilate +2,
-            %         and re-cluster — separates clusters that touch at CT res.
-            tmpRs = 'temp_clusts_rs0.5';
-            tmpDe = 'temp_clusts_rs0.5_de2';
-
-            cmd2 = sprintf( ...
-                '3dresample -prefix "%s" -overwrite -rmode NN -dxyz 0.5 0.5 0.5 -inset "%s"', ...
-                tmpRs, outFull);
-            cmd3 = sprintf( ...
-                '3dmask_tool -dilate_inputs -1 +2 -prefix "%s" -overwrite -inputs "%s+orig"', ...
-                tmpDe, tmpRs);
-            cmd4 = sprintf( ...
-                '3dclust -savemask "%s" -overwrite -1Dformat -1clip %d %d %d "%s+orig" > "%s"', ...
-                outFull, cv, rmm, vmul, tmpDe, clst1D);
-            cleanup = sprintf('rm -f "%s+orig.HEAD" "%s+orig.BRIK" "%s+orig.HEAD" "%s+orig.BRIK"', ...
-                tmpRs, tmpRs, tmpDe, tmpDe);
-
-            for cmdCell = {cmd2, cmd3, cmd4, cleanup}
-                [status, txt] = unix(sprintf('cd "%s" && %s', clustDir, cmdCell{1}));
-                if status ~= 0 && ~contains(cmdCell{1}, 'rm')
-                    fprintf('%s\n', txt);
-                    warning('[Stage 6] AFNI step returned non-zero exit: %s', cmdCell{1}(1:min(60,end)));
-                end
-            end
-
-            % Step 3: parse clst.1D for cluster centroids (CT RAI mm)
-            centroids_ct = electrodeLocalizer.parseClst1D(clst1D);
+            % Parse clst.1D: centroids (CT RAI mm) + cluster volumes.
+            % Filter by volume: 3dclust's vmul already removes too-small blobs;
+            % AFNI_CLUSTER_MAX_UL removes skull/bone artifacts (typically > 2000 µl).
+            [centroids_ct, volumes] = electrodeLocalizer.parseClst1D(clst1D);
+            keep = volumes <= electrodeLocalizer.AFNI_CLUSTER_MAX_UL;
+            n_total   = size(centroids_ct, 1);
+            n_removed = sum(~keep);
+            centroids_ct = centroids_ct(keep, :);
             N = size(centroids_ct, 1);
-            fprintf('[Stage 6] Found %d electrode clusters.\n', N);
+            fprintf('[Stage 6] Found %d clusters; removed %d artifact(s) > %d µl; keeping %d.\n', ...
+                n_total, n_removed, electrodeLocalizer.AFNI_CLUSTER_MAX_UL, N);
             assert(N > 0, ...
                 '[Stage 6] No clusters found. Check CT_HU_THRESHOLD (%d HU) or CT file.', cv);
 
@@ -733,9 +765,31 @@ classdef electrodeLocalizer < handle
             mr_coords = xfm_leads(ct_coords, aff1D, ctBrik, 'RAI', clustDir);
             clusters_mm = mr_coords{:, {'x','y','z'}};
 
+            % Spatial proximity filter: drop clusters too far from the pial
+            % surface.  Hardware anchors and dense bone fragments that survive
+            % the volume filter often land > 40 mm from the nearest cortical
+            % vertex.  Depth electrode contacts in hippocampus/amygdala are
+            % typically 20-35 mm from cortex, so a 40 mm threshold keeps them.
+            sumaDir  = fullfile(self.locDirs.fs_subj, 'SUMA');
+            lhPialF  = fullfile(sumaDir, 'lh.pial.gii');
+            rhPialF  = fullfile(sumaDir, 'rh.pial.gii');
+            if exist(lhPialF,'file') == 2 && exist(rhPialF,'file') == 2
+                pialV = [gifti(lhPialF).vertices; gifti(rhPialF).vertices];
+                maxD  = electrodeLocalizer.SURFACE_PROXIMITY_MAX_MM;
+                prox_keep = false(size(clusters_mm,1), 1);
+                for ci = 1:size(clusters_mm,1)
+                    d = clusters_mm(ci,:) - pialV;          % Nv × 3
+                    prox_keep(ci) = sqrt(min(sum(d.^2,2))) <= maxD;
+                end
+                n_prox = sum(~prox_keep);
+                clusters_mm = clusters_mm(prox_keep, :);
+                fprintf('[Stage 6] Removed %d cluster(s) > %d mm from pial surface; %d remaining.\n', ...
+                    n_prox, maxD, size(clusters_mm,1));
+            end
+
             self.clusters = clusters_mm;
             save(clustFile, 'clusters_mm');
-            fprintf('[Stage 6] %d cluster centroids saved to %s\n', N, clustFile);
+            fprintf('[Stage 6] %d cluster centroids saved to %s\n', size(clusters_mm,1), clustFile);
         end
 
         % -----------------------------------------------------------------
@@ -757,6 +811,24 @@ classdef electrodeLocalizer < handle
 
             N = size(self.clusters, 1);
             fprintf('[Stage 7] Launching electrode naming GUI (%d clusters)...\n', N);
+
+            % Reorder clusters by greedy nearest-neighbor, starting from the
+            % most-anterior point (max y in RAS).  This keeps contacts on the
+            % same shank consecutive and groups nearby shanks together, making
+            % the naming task much faster than the arbitrary volume-sort order.
+            pts = self.clusters;
+            order   = zeros(1, N);
+            visited = false(1, N);
+            [~, seed] = max(pts(:, 2));   % most anterior cluster first
+            order(1) = seed;  visited(seed) = true;
+            for ii = 2:N
+                prev = pts(order(ii-1), :);
+                d = sum((pts - prev).^2, 2);
+                d(visited) = Inf;
+                [~, nxt] = min(d);
+                order(ii) = nxt;  visited(nxt) = true;
+            end
+            localClusters = pts(order, :);   % N×3, greedy-NN order
 
             sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
             lhFile  = fullfile(sumaDir, 'lh.pial.gii');
@@ -791,9 +863,9 @@ classdef electrodeLocalizer < handle
                 'FaceColor', [0.75 0.70 0.65], 'EdgeColor', 'none', ...
                 'FaceAlpha', 0.4, 'PickableParts', 'none', 'HitTest', 'off');
 
-            dotColors = repmat([0.45 0.45 0.45], N, 1);
-            hDots = scatter3(ax, self.clusters(:,1), self.clusters(:,2), ...
-                self.clusters(:,3), 50, dotColors, 'filled', 'HitTest', 'off');
+            dotColors = repmat([0 0.9 0.9], N, 1);   % cyan — visible against brain surface
+            hDots = scatter3(ax, localClusters(:,1), localClusters(:,2), ...
+                localClusters(:,3), 50, dotColors, 'filled', 'HitTest', 'off');
             hHi  = scatter3(ax, NaN, NaN, NaN, 140, [1 0.8 0], 'filled', ...
                 'MarkerEdgeColor', 'w', 'LineWidth', 1.5, 'HitTest', 'off');
 
@@ -879,7 +951,7 @@ classdef electrodeLocalizer < handle
             valid    = ~artifact & ~cellfun(@isempty, nameOut);
             nameOut  = nameOut(valid);
             typeOut  = typeOut(valid);
-            xyz      = self.clusters(valid, :);
+            xyz      = localClusters(valid, :);
             self.leads = table(nameOut, xyz(:,1), xyz(:,2), xyz(:,3), typeOut, ...
                 'VariableNames', {'chanName','x','y','z','type'});
             fprintf('[Stage 7] %d contacts accepted, %d artifacts.\n', ...
@@ -891,10 +963,10 @@ classdef electrodeLocalizer < handle
                 if ~ishandle(fig), return; end
                 set(hInfo, 'String', sprintf('Cluster  %d  /  %d', k, N));
                 set(hXYZ,  'String', sprintf('x=%.1f   y=%.1f   z=%.1f', ...
-                    self.clusters(k,:)));
-                set(hHi, 'XData', self.clusters(k,1), ...
-                         'YData', self.clusters(k,2), ...
-                         'ZData', self.clusters(k,3));
+                    localClusters(k,:)));
+                set(hHi, 'XData', localClusters(k,1), ...
+                         'YData', localClusters(k,2), ...
+                         'ZData', localClusters(k,3));
 
                 % List box: remaining (unassigned) channel names
                 used = nameOut(~cellfun(@isempty, nameOut));
@@ -1167,11 +1239,13 @@ classdef electrodeLocalizer < handle
             end
         end
 
-        function centroids = parseClst1D(clst1DPath)
-            % Parse AFNI 3dclust -1Dformat output and return cluster centroids.
+        function [centroids, volumes] = parseClst1D(clst1DPath)
+            % Parse AFNI 3dclust -1Dformat output and return cluster centroids + volumes.
             %
-            % Returns [N x 3] matrix of centroid coordinates in CT RAI mm
-            % (CM_LR, CM_AP, CM_IS — columns 2, 3, 4 of each data row).
+            % Returns:
+            %   centroids - [N x 3] matrix of centroid coordinates in CT RAI mm
+            %               (CM_RL, CM_AP, CM_IS — columns 2, 3, 4 of each data row)
+            %   volumes   - [N x 1] vector of cluster volumes in µl (column 1)
 
             fid = fopen(clst1DPath, 'r');
             assert(fid > 0, '[electrodeLocalizer] Cannot open %s', clst1DPath);
@@ -1186,15 +1260,18 @@ classdef electrodeLocalizer < handle
 
             if isempty(lines)
                 centroids = zeros(0, 3);
+                volumes   = zeros(0, 1);
                 return;
             end
 
-            % Each data row: rank  CM_LR  CM_AP  CM_IS  minRL ...
-            % Columns 2, 3, 4 (1-indexed) are the RAI mm centroids.
+            % Each data row: Volume  CM_RL  CM_AP  CM_IS  minRL ...
+            % Column 1 = Volume (µl); Columns 2, 3, 4 = RAI mm centroids.
             centroids = zeros(numel(lines), 3);
+            volumes   = zeros(numel(lines), 1);
             for i = 1:numel(lines)
                 vals = sscanf(lines{i}, '%f');
-                centroids(i, :) = vals(2:4)';
+                volumes(i)     = vals(1);
+                centroids(i,:) = vals(2:4)';
             end
         end
 

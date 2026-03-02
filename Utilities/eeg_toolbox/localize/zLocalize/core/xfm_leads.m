@@ -95,6 +95,12 @@ function mr_coords = xfm_leads(ct_coords, xfm_file, ct_file, coord_format, varar
     
     % Extract coordinates from gifti, store in table
     mr_xyz = nimg_gifti2coords(fullfile(working_dir,fname_surf));
+
+    % NOTE: elec.gii from ConvertSurface is already in the same coordinate
+    % system as the FreeSurfer pial GIFTI surfaces — no z-flip needed.
+    % (Verified: pre-flip z range matches pial surface z range; post-flip
+    % would push contacts 38mm below the brain's inferior boundary.)
+
     mr_coords = ct_coords;
     mr_coords{:, {'x','y','z'}} = mr_xyz{:,:};
     
