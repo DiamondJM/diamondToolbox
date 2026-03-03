@@ -63,7 +63,8 @@ classdef sourceLocalizer < handle
             % Note:
             %   Channel names are prompted during the electrode localization
             %   create pipeline (just before the naming GUI). They can also
-            %   be assigned directly at any time via sl.chanNames.
+            %   be assigned directly (sl.chanNames) or loaded automatically
+            %   from a time series file via sl.loadTimeSeries().
             %
             %   timeSeries and Fs are NOT constructor arguments. Either
             %   assign them directly after construction:
