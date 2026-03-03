@@ -165,8 +165,8 @@ classdef electrodeLocalizer < handle
                 dlg = self.localizationSetupDialog();
                 switch dlg.action
                     case 'cancel'
-                        fprintf('[electrodeLocalizer] Cancelled.\n');
-                        return;
+                        error('electrodeLocalizer:cancelled', ...
+                            '[electrodeLocalizer] Setup cancelled by user.');
                     case 'import'
                         % Dialog copied whatever the user provided; loop back
                         % so they can see updated status and import the rest,
@@ -1506,6 +1506,7 @@ classdef electrodeLocalizer < handle
                     end
                     [f, d] = uigetfile(filt, sprintf('Select %s  (%d of %d missing)', ...
                         names{k}, sum(~present), N));
+                    figure(fig);   % restore focus after uigetfile
                     if isequal(f, 0)
                         return;   % cancelled — leave dialog open
                     end
