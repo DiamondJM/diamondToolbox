@@ -2009,7 +2009,10 @@ classdef sourceLocalizer < handle
             %
             % Supported formats:
             %   .mat — loads a variable containing a cell array of strings.
-            %   .csv — first column used as channel names.
+            %   .csv — looks for a column named name/chanName/label/channel/
+            %          electrode (case-insensitive); falls back to first column
+            %          for headerless files. Compatible with BIDS electrodes.tsv
+            %          (rename .tsv to .csv or use the 'name' column directly).
             %   .fif — reads header only via FieldTrip ft_read_header;
             %          accepts both head-only files (e.g. *-head.fif) and
             %          full data files. Requires FieldTrip on the path.
@@ -2022,7 +2025,7 @@ classdef sourceLocalizer < handle
                      '', ...
                      'Accepted formats:', ...
                      '  .mat  — MATLAB workspace containing a cell array of strings', ...
-                     '  .csv  — first column used as channel names', ...
+                     '  .csv  — name/chanName/label column, or first column if no header', ...
                      '  .fif  — MNE/FieldTrip file; channel names read from header'}, ...
                     'Channel Names', ...
                     'Browse...', 'Skip');
@@ -2061,8 +2064,20 @@ classdef sourceLocalizer < handle
                 end
 
             elseif strcmpi(ext, '.csv')
-                T = readtable(fullPath, 'ReadVariableNames', false);
-                chanNames = T{:, 1};
+                % Try to find a named column first (handles BIDS and similar
+                % formats where the column is called 'name', 'label', etc.).
+                T = readtable(fullPath, 'ReadVariableNames', true);
+                knownCols = {'channame','channames','name','names', ...
+                             'channel','channels','channel_name','channel_names', ...
+                             'label','labels','electrode','electrodes'};
+                colMatch = find(ismember(lower(T.Properties.VariableNames), knownCols), 1);
+                if ~isempty(colMatch)
+                    chanNames = T{:, colMatch};
+                else
+                    % No recognised header — treat as headerless, take col 1.
+                    T = readtable(fullPath, 'ReadVariableNames', false);
+                    chanNames = T{:, 1};
+                end
 
             elseif strcmpi(ext, '.fif')
                 sourceLocalizer.ensureFieldTrip();
