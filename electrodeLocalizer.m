@@ -1496,8 +1496,7 @@ classdef electrodeLocalizer < handle
                     [f, d] = uigetfile(filt, sprintf('Select %s  (%d of %d missing)', ...
                         names{k}, sum(~present), N));
                     if isequal(f, 0)
-                        fprintf('[import] %s skipped.\n', names{k});
-                        continue;
+                        return;   % cancelled — leave dialog open
                     end
                     src = fullfile(d, f);
                     try
