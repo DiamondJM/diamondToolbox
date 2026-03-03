@@ -48,7 +48,7 @@ All users
 ---------
 - MATLAB with:
     Signal Processing Toolbox  (filtfilt, hilbert, findpeaks, buffer, medfilt1)
-    Image Processing Toolbox   (bwconncomp, regionprops3 — for electrodeLocalizer)
+    Image Processing Toolbox   (strel, imclose, imdilate — for electrodeLocalizer envelope step)
 - diamondToolbox (this repository), added to the MATLAB path via
   addpath(genpath(pwd)) from the diamondToolbox root directory
 - braindata2 and brainplotter objects (bundled in this repository)
