@@ -434,12 +434,14 @@ classdef sourceLocalizer < handle
 
             %% find peaks based on polarity
 
-            warning('off','signal:findpeaks:largeMinPeakHeight');
 
             fullRaster = sparse(tsDims(1),tsDims(2));
             waveformsMaster = cell(1,tsDims(2));
 
             parfor(kk=1:length(self.chanNames))
+
+                warning('off','signal:findpeaks:largeMinPeakHeight');
+                % Once for each worker 
 
                 currentRaster = sparse(tsDims(1),1);
                 waveforms = cell(size(currentRaster));
@@ -1104,7 +1106,7 @@ classdef sourceLocalizer < handle
 
             [myBd, myBp] = self.retrieveBraindata;
 
-            fprintf('Building geodesic distances for %s. \n',self.subj);
+            fprintf('Building geodesic distances for %s. This can take up to 10 minutes. \n',self.subj);
 
             %% Go on to build the geodesic distances
 
@@ -1622,6 +1624,14 @@ classdef sourceLocalizer < handle
                 [1 0 0; 0 0 1; 0 1 0],... coronal 
                 [0 0 1; 1 0 0; 0 1 0]}; %  sagittal
 
+            if isequal(self.localizationMode,'seizure') && isequal(colorMode,'auto')
+                fprintf('\n%s\n', repmat('%', 1, 70));
+                fprintf('HINT: Try passing ''colorMode'',''heatmap'' to view results in\n');
+                fprintf('terms of localization density, rather than in terms of timing.\n');
+                fprintf('%s\n\n', repmat('%', 1, 70));
+            end
+
+
             for ii = 1:length(useMatrices)
 
                 subplot(1,length(useMatrices),ii) 
@@ -1695,10 +1705,13 @@ classdef sourceLocalizer < handle
                     case 'seizure'; colorMode = 'timing'; 
                 end
                 if isequal(locMode,'seizure')
-                    fprintf('\n%s\n', repmat('%', 1, 70));
-                    fprintf('HINT: Try passing ''colorMode'',''heatmap'' to view results in\n');
-                    fprintf('terms of localization density, rather than in terms of timing.\n');
-                    fprintf('%s\n\n', repmat('%', 1, 70));
+                    st = dbstack; 
+                    if ~isequal(st(2).name,'sourceLocalizer.plotDimensionsReducedWrapper')
+                        fprintf('\n%s\n', repmat('%', 1, 70));
+                        fprintf('HINT: Try passing ''colorMode'',''heatmap'' to view results in\n');
+                        fprintf('terms of localization density, rather than in terms of timing.\n');
+                        fprintf('%s\n\n', repmat('%', 1, 70));
+                    end
                 end
             elseif isequal(colorMode,'timing')
                 if isequal(locMode,'spikes'); warning('Spike localization results will be colored according to timing, but timing is probably meaningless, since you''re considering IED localization.'); end                % timing mode intended for seizures. 
@@ -2006,14 +2019,11 @@ classdef sourceLocalizer < handle
 
             chanNames = {};
 
-            fprintf('Select a file containing channel names (.mat, .csv, or .fif).\n');
-            fprintf('Cancel the dialog to proceed without channel names.\n');
             [fname, fpath] = uigetfile( ...
                 {'*.mat;*.csv;*.fif', 'Channel names file (*.mat, *.csv, *.fif)'}, ...
                 'Select channel names file (cancel to skip)');
 
             if isequal(fname, 0)
-                fprintf('No channel names file selected. chanNames will be empty.\n');
                 return;
             end
 
