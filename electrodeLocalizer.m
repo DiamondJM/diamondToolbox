@@ -188,6 +188,9 @@ classdef electrodeLocalizer < handle
             self.runSuma();              % never force — SUMA takes minutes
             self.coregisterCT('forceNew', forceNew);
             self.detectElectrodes('forceNew', forceNew);
+            if isempty(self.chanNames)
+                self.chanNames = sourceLocalizer.loadChanNamesFromFile();
+            end
             self.namingGUI();
             self.projectElectrodes();
             self.writeLeads();
