@@ -120,6 +120,13 @@ Step 2 — Construct a sourceLocalizer object:
      - sl.loadTimeSeries()  — populates sl.chanNames from the file header
      - sl.chanNames = myNames  — direct assignment at any time
 
+   Channel name file formats (all three entry points accept):
+     .mat  — MATLAB workspace containing a cell array of strings
+     .csv  — any column named name, chanName, label, channel, or electrode
+             (case-insensitive); falls back to first column if none match.
+             BIDS *_electrodes.tsv files work directly (rename to .csv).
+     .fif  — MNE/FieldTrip file; channel names read from header
+
    Optional name-value argument:
       'forceNewElectrodeLocalizer', true  — re-run electrode localization even
                                             if tal/leads.csv already exists.
@@ -205,7 +212,7 @@ Configuring binary paths
 FreeSurfer and AFNI binary directories default to common install locations.
 Override them via constructor arguments:
 
-      sl = sourceLocalizer(subj, rootFolder, chanNames, ...
+      sl = sourceLocalizer(subj, rootFolder, ...
               'freesurfer_bin', '/path/to/freesurfer/bin', ...
               'afni_bin',       '/path/to/abin');
 
@@ -258,8 +265,10 @@ All gifti surfaces must be in the AFNI/SUMA standard ld141 format
 brainplotter.
 
 BIDS note: leads.csv is closely analogous to the BIDS *_electrodes.tsv format
-(columns: name, x, y, z). A BIDS-formatted file can be used as the source for
-import after renaming the 'name' column to 'chanName'.
+(columns: name, x, y, z). To import a BIDS electrodes file as leads.csv,
+rename the 'name' column to 'chanName'. For channel name files (used by the
+naming GUI), BIDS-formatted CSVs are accepted directly — the 'name' column
+is recognised automatically.
 
 --------------------------------------------------------------------------------
 KEY PARAMETERS  (sourceLocalizer)
