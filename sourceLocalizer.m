@@ -165,7 +165,7 @@ classdef sourceLocalizer < handle
         %% Property setters
 
         function set.timeSeries(self, val)
-            if ~isempty(self.chanNames)
+            if ~isempty(self.chanNames) && ~isempty(val)
                 assert(size(val, 2) == length(self.chanNames), ...
                     ['timeSeries must have %d columns (one per channel ' ...
                      'in chanNames), got %d.'], ...
@@ -175,8 +175,10 @@ classdef sourceLocalizer < handle
         end
 
         function set.Fs(self, val)
-            assert(isnumeric(val) && isscalar(val) && val > 0, ...
-                'Fs must be a positive scalar.');
+            if ~isempty(val)
+                assert(isnumeric(val) && isscalar(val) && val > 0, ...
+                    'Fs must be a positive scalar.');
+            end
             self.Fs = val;
         end
 
