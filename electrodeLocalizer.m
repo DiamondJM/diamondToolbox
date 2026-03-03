@@ -160,22 +160,26 @@ classdef electrodeLocalizer < handle
             fprintf('|            electrodeLocalizer — %s\n', self.subj);
             fprintf('+----------------------------------------------------------+\n');
 
-            % If output files are missing, show the setup dialog.
-            if ~self.isComplete()
+            % Show setup dialog until complete, cancelled, or user picks Create.
+            while ~self.isComplete()
                 dlg = self.localizationSetupDialog();
                 switch dlg.action
                     case 'cancel'
                         fprintf('[electrodeLocalizer] Cancelled.\n');
                         return;
                     case 'import'
-                        % Paths already copied by dialog; check completeness.
-                        if self.isComplete()
-                            return;
-                        end
-                        % Partial import — fall through to run remaining stages.
+                        % Dialog copied whatever the user provided; loop back
+                        % so they can see updated status and import the rest,
+                        % or exit automatically if everything is now in place.
+                        continue;
                     case 'create'
-                        % Fall through: run the full pipeline below.
+                        break;   % proceed to full pipeline below
                 end
+            end
+
+            % If import made everything complete, nothing left to do.
+            if self.isComplete()
+                return;
             end
 
             self.checkPrerequisites('errorIfMissing', true);
