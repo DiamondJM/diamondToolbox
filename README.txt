@@ -247,7 +247,7 @@ outputs are already in place.
 
 Files that can be imported
 --------------------------
-  leads.csv                    — required; must have columns chanName, x, y, z
+  leads.csv                   — required; must have columns chanName, x, y, z
   lh.pial-outer-smoothed.gii  — required for electrode projection
   rh.pial-outer-smoothed.gii  — required for electrode projection
   lh.pial.gii                 — used for electrode naming GUI display
