@@ -143,10 +143,14 @@ classdef sourceLocalizer < handle
                 end
                 % else: existing chanNames match → leave alone
             else
+                % File has no channel labels — prompt if we don't have them yet.
                 if isempty(self.chanNames)
-                    error('[sourceLocalizer] chanNames is empty and the file provides no channel labels. Set sl.chanNames first.');
+                    self.chanNames = sourceLocalizer.loadChanNamesFromFile();
+                end
+                if isempty(self.chanNames)
+                    error('[sourceLocalizer] Channel names are required. Provide a channel names file or set sl.chanNames directly.');
                 elseif length(self.chanNames) ~= nCh
-                    error('[sourceLocalizer] chanNames has %d entries but time series has %d channels.',...
+                    error('[sourceLocalizer] chanNames has %d entries but time series has %d channels.', ...
                         length(self.chanNames), nCh);
                 end
                 % else: existing chanNames match → fine
@@ -220,7 +224,7 @@ classdef sourceLocalizer < handle
                 myBd = braindata2(self.subj,self.rootFolder);
                 myBp = ez_get_plotter(myBd);
 
-                if saving; save(fullfile(subjDir,'bdBpFull'),'myBd','myBp'); end
+                if saving; save(fName,'myBd','myBp'); end
 
             end
 
@@ -2093,19 +2097,26 @@ classdef sourceLocalizer < handle
             Fs         = [];
             chanNames  = {};
 
-            fprintf('Select a time series file (.mat, .edf, or .fif).\n');
-            fprintf('Cancel the dialog to skip.\n');
-
-            [fname, fpath] = uigetfile( ...
-                {'*.mat;*.edf;*.fif', 'Time series files (*.mat, *.edf, *.fif)'; ...
-                 '*.mat',             'MATLAB file (*.mat)'; ...
-                 '*.edf',             'European Data Format (*.edf)'; ...
-                 '*.fif',             'MNE FIF file (*.fif)'}, ...
-                'Select time series file (cancel to skip)');
-
-            if isequal(fname, 0)
-                fprintf('No file selected.\n');
-                return;
+            while true
+                choice = dlgNonModal( ...
+                    {'Select a time series file.', ...
+                     '', ...
+                     'Accepted formats:', ...
+                     '  .mat  — MATLAB workspace with a [samples x channels] matrix', ...
+                     '  .edf  — European Data Format', ...
+                     '  .fif  — MNE/FieldTrip file'}, ...
+                    'Load Time Series', 'Browse...', 'Cancel');
+                if isempty(choice) || strcmp(choice, 'Cancel')
+                    return;
+                end
+                [fname, fpath] = uigetfile( ...
+                    {'*.mat;*.edf;*.fif', 'Time series files (*.mat, *.edf, *.fif)'; ...
+                     '*.mat',             'MATLAB file (*.mat)'; ...
+                     '*.edf',             'European Data Format (*.edf)'; ...
+                     '*.fif',             'MNE FIF file (*.fif)'}, ...
+                    'Select time series file');
+                if ~isequal(fname, 0), break; end
+                % cancelled file picker — loop back to description dialog
             end
 
             fullPath = fullfile(fpath, fname);
