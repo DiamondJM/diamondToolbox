@@ -451,10 +451,17 @@ classdef electrodeLocalizer < handle
             surfDir = fullfile(self.locDirs.fs_subj, 'surf');
             lhPial  = fullfile(surfDir, 'lh.pial-outer-smoothed');
             rhPial  = fullfile(surfDir, 'rh.pial-outer-smoothed');
-            done    = exist(lhPial, 'file') == 2 && exist(rhPial, 'file') == 2;
+            nativeDone = exist(lhPial, 'file') == 2 && exist(rhPial, 'file') == 2;
 
-            if done && ~forceNew
-                fprintf('[Stage 3] Surface already exists; skipping recon-all.\n');
+            % Also treat imported SUMA GIFTIs as sufficient — the user may
+            % have surfaces from a prior FreeSurfer run and just imported them.
+            sumaDir  = fullfile(self.locDirs.fs_subj, 'SUMA');
+            lhGii    = fullfile(sumaDir, 'lh.pial-outer-smoothed.gii');
+            rhGii    = fullfile(sumaDir, 'rh.pial-outer-smoothed.gii');
+            giftiDone = exist(lhGii, 'file') == 2 && exist(rhGii, 'file') == 2;
+
+            if (nativeDone || giftiDone) && ~forceNew
+                fprintf('[Stage 3] Surface outputs already present; skipping recon-all.\n');
                 return;
             end
 
