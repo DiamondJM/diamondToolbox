@@ -413,28 +413,39 @@ classdef electrodeLocalizer < handle
 
             % MRI
             if exist(mrDest, 'file') ~= 2
-                fprintf('Select pre-operative MRI (T1 MPRAGE) — .nii, .nii.gz, or .mgz...\n');
+                choice = questdlg( ...
+                    {'Select the pre-operative T1 MPRAGE MRI for this subject.', '', ...
+                     'Accepted formats:  .nii  |  .nii.gz  |  .mgz'}, ...
+                    'Pre-op MRI', 'Browse...', 'Cancel', 'Browse...');
+                if isempty(choice) || strcmp(choice, 'Cancel')
+                    error('[electrodeLocalizer] MRI is required.');
+                end
                 [f, d] = uigetfile(filter, 'Select pre-op MRI');
                 if isequal(f, 0)
                     error('[electrodeLocalizer] MRI is required.');
                 end
                 self.convertToNii(fullfile(d, f), mrDest);
-                fprintf('MRI ready at %s\n', mrDest);
             else
-                fprintf('MRI already present: %s\n', mrDest);
+                fprintf('[Stage 2] MRI already present: %s\n', mrDest);
             end
 
             % CT
             if exist(ctDest, 'file') ~= 2
-                fprintf('Select post-operative CT — .nii, .nii.gz, or .mgz...\n');
+                choice = questdlg( ...
+                    {'Select the post-operative CT scan for this subject.', '', ...
+                     'This should be the CT acquired after electrode implantation.', ...
+                     'Accepted formats:  .nii  |  .nii.gz  |  .mgz'}, ...
+                    'Post-op CT', 'Browse...', 'Cancel', 'Browse...');
+                if isempty(choice) || strcmp(choice, 'Cancel')
+                    error('[electrodeLocalizer] CT is required.');
+                end
                 [f, d] = uigetfile(filter, 'Select post-op CT');
                 if isequal(f, 0)
                     error('[electrodeLocalizer] CT is required.');
                 end
                 self.convertToNii(fullfile(d, f), ctDest);
-                fprintf('CT ready at %s\n', ctDest);
             else
-                fprintf('CT already present: %s\n', ctDest);
+                fprintf('[Stage 2] CT already present: %s\n', ctDest);
             end
         end
 
