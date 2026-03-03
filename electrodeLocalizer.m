@@ -160,27 +160,19 @@ classdef electrodeLocalizer < handle
             fprintf('|            electrodeLocalizer — %s\n', self.subj);
             fprintf('+----------------------------------------------------------+\n');
 
-            % Show setup dialog until complete, cancelled, or user picks Create.
-            while ~self.isComplete()
-                dlg = self.localizationSetupDialog();
-                switch dlg.action
-                    case 'cancel'
-                        error('electrodeLocalizer:cancelled', ...
-                            '[electrodeLocalizer] Setup cancelled by user.');
-                    case 'import'
-                        % Dialog copied whatever the user provided; loop back
-                        % so they can see updated status and import the rest,
-                        % or exit automatically if everything is now in place.
-                        continue;
-                    case 'create'
-                        break;   % proceed to full pipeline below
-                end
+            % Short-circuit if everything is already in place.
+            if self.isComplete(), return; end
+
+            % Show setup dialog.  Imports are handled inline; dialog only
+            % closes when the user clicks Create or Cancel.
+            dlg = self.localizationSetupDialog();
+            if strcmp(dlg.action, 'cancel')
+                error('electrodeLocalizer:cancelled', ...
+                    '[electrodeLocalizer] Setup cancelled by user.');
             end
 
-            % If import made everything complete, nothing left to do.
-            if self.isComplete()
-                return;
-            end
+            % If imports made everything complete, nothing left to do.
+            if self.isComplete(), return; end
 
             self.checkPrerequisites('errorIfMissing', true);
             self.getInputFiles();
@@ -481,7 +473,7 @@ classdef electrodeLocalizer < handle
                 return;
             end
 
-            fprintf('[Stage 3] Running FreeSurfer surface reconstruction...\n');
+            fprintf('[Stage 3] Running FreeSurfer surface reconstruction (recon-all — expect 8–10+ hours)...\n');
 
             % Pre-set FREESURFER (bare, no _HOME) so recon-all can find it
             % even when its own `setenv LANG C` (issued before sourcing
@@ -493,8 +485,25 @@ classdef electrodeLocalizer < handle
             setenv('FREESURFER_HOME', fsHome);
 
             mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+
+            % create_surf decides whether to skip recon-all by checking if
+            % the subject folder is non-empty — but localizer_create_directories
+            % already created that folder (empty), which create_surf handles.
+            % If a prior partial run left files there WITHOUT a completed
+            % lh.pial, create_surf would skip recon-all and crash on the
+            % envelope step.  Detect and clean up that state here.
+            rawPial = fullfile(self.locDirs.fs_subj, 'surf', 'lh.pial');
+            reconDone = exist(rawPial, 'file') == 2;
+            fsSubjDir = self.locDirs.fs_subj;
+            subjHasFiles = exist(fsSubjDir, 'dir') == 7 && numel(dir(fsSubjDir)) > 2;
+            if subjHasFiles && ~reconDone
+                fprintf('[Stage 3] Partial FreeSurfer output detected (recon-all incomplete); removing and restarting.\n');
+                rmdir(fsSubjDir, 's');
+            end
+
+            envelopeOnly = reconDone && ~forceNew;
             create_surf(self.subj, mrNii, self.locDirs.fs, ...
-                'freesurfer_bin', self.fsBin);
+                'freesurfer_bin', self.fsBin, 'envelope_only', envelopeOnly);
         end
 
         % -----------------------------------------------------------------
@@ -1498,38 +1507,36 @@ classdef electrodeLocalizer < handle
             end
 
             function cbImport(~,~)
-                % Open a file dialog for each missing file in turn.
+                % Import only the currently selected file; update its row
+                % in-place and stay on the dialog.
+                k = get(hList, 'Value');
+                if present(k), return; end   % already imported
+                if strcmp(names{k}, 'leads.csv')
+                    filt = {'*.csv', 'CSV file (*.csv)'};
+                else
+                    filt = {'*.gii', 'GIFTI surface (*.gii)'};
+                end
+                [f, d] = uigetfile(filt, sprintf('Select %s', names{k}));
+                figure(fig);   % restore focus after uigetfile
+                if isequal(f, 0), return; end   % cancelled — leave dialog open
+                src = fullfile(d, f);
+                try
+                    if strcmp(names{k}, 'leads.csv')
+                        electrodeLocalizer.validateLeadsCSV(src, self.chanNames);
+                    else
+                        electrodeLocalizer.validateGifti(src);
+                    end
+                catch e
+                    warndlg(e.message, sprintf('Validation failed — %s', names{k}));
+                    return;
+                end
                 if ~exist(talDir,  'dir'), mkdir(talDir);  end
                 if ~exist(sumaDir, 'dir'), mkdir(sumaDir); end
-                for k = 1:N
-                    if present(k), continue; end
-                    if strcmp(names{k}, 'leads.csv')
-                        filt = {'*.csv', 'CSV file (*.csv)'};
-                    else
-                        filt = {'*.gii', 'GIFTI surface (*.gii)'};
-                    end
-                    [f, d] = uigetfile(filt, sprintf('Select %s  (%d of %d missing)', ...
-                        names{k}, sum(~present), N));
-                    figure(fig);   % restore focus after uigetfile
-                    if isequal(f, 0)
-                        return;   % cancelled — leave dialog open
-                    end
-                    src = fullfile(d, f);
-                    try
-                        if strcmp(names{k}, 'leads.csv')
-                            electrodeLocalizer.validateLeadsCSV(src, self.chanNames);
-                        else
-                            electrodeLocalizer.validateGifti(src);
-                        end
-                    catch e
-                        warndlg(e.message, sprintf('Validation failed — %s', names{k}));
-                        continue;
-                    end
-                    copyfile(src, dests{k});
-                    fprintf('[import] %s → %s\n', src, dests{k});
-                end
-                setappdata(0, 'eloc_dlg_result', struct('action','import'));
-                delete(fig);
+                copyfile(src, dests{k});
+                fprintf('[import] %s → %s\n', src, dests{k});
+                present(k) = true;
+                listStrs{k} = ['[OK]  ' names{k}];
+                set(hList, 'String', listStrs);
             end
 
             function cbCancel(~,~)

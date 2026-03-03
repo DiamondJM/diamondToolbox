@@ -279,13 +279,9 @@ classdef braindata2 < handle
                 bd.roi.roic_lead_bipo = data.(char(fieldnames(data)));
             end
 
-            localizer_rois(bd.subj,bd.rootEEGdir,1);
-            % JD edit: force new localizer to run. 
-            fprintf('There was an issue with how the localization data was originally run, where only a subset of ROIs were retained. Therefore we have to re-run the ROI generation procedure at this time.'); 
-            % In the future, the whole localization pipeline could be rerun
-            % with the proper change made to localizer_rois. In that case,
-            % this call would not be necessary. 
-
+            % localizer_rois(bd.subj,bd.rootEEGdir,1);
+            % Are you running this internal to the Zaghloul lab? If so,
+            % uncomment the code above. 
             
             if isfield(bd.filepaths, 'roic_roi_lh') && exist(bd.filepaths.roic_roi_lh, 'file')
                 bd.roi.roic_roi_lh = readtableSafe(bd.filepaths.roic_roi_lh);
