@@ -413,11 +413,11 @@ classdef electrodeLocalizer < handle
 
             % MRI
             if exist(mrDest, 'file') ~= 2
-                choice = questdlg( ...
+                choice = dlgNonModal( ...
                     {'Select the pre-operative T1 MPRAGE MRI for this subject.', '', ...
                      'Accepted formats:  .nii  |  .nii.gz  |  .mgz'}, ...
-                    'Pre-op MRI', 'Browse...', 'Cancel', 'Browse...');
-                if isempty(choice) || strcmp(choice, 'Cancel')
+                    'Pre-op MRI', 'Browse...', 'Cancel');
+                if ~strcmp(choice, 'Browse...')
                     error('[electrodeLocalizer] MRI is required.');
                 end
                 [f, d] = uigetfile(filter, 'Select pre-op MRI');
@@ -431,12 +431,12 @@ classdef electrodeLocalizer < handle
 
             % CT
             if exist(ctDest, 'file') ~= 2
-                choice = questdlg( ...
+                choice = dlgNonModal( ...
                     {'Select the post-operative CT scan for this subject.', '', ...
                      'This should be the CT acquired after electrode implantation.', ...
                      'Accepted formats:  .nii  |  .nii.gz  |  .mgz'}, ...
-                    'Post-op CT', 'Browse...', 'Cancel', 'Browse...');
-                if isempty(choice) || strcmp(choice, 'Cancel')
+                    'Post-op CT', 'Browse...', 'Cancel');
+                if ~strcmp(choice, 'Browse...')
                     error('[electrodeLocalizer] CT is required.');
                 end
                 [f, d] = uigetfile(filter, 'Select post-op CT');
