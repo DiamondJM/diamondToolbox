@@ -1542,10 +1542,7 @@ classdef electrodeLocalizer < handle
                     set(rowPanels{k}, 'BackgroundColor', bg);
                     kids = get(rowPanels{k}, 'Children');
                     for kk = 1:numel(kids)
-                        try
-                            set(kids(kk), 'BackgroundColor', bg);
-                        catch
-                        end
+                        set(kids(kk), 'BackgroundColor', bg);
                     end
                 end
                 set(hDesc, 'String', descs{idx});
