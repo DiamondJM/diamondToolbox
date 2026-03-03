@@ -115,14 +115,11 @@ Step 2 — Construct a sourceLocalizer object:
       subj        — Subject identifier string, e.g. 'NIH032'
       rootFolder  — Path to the root data folder (see folder structure above)
 
-   Optional positional argument:
-      chanNames   — [m x 1] cell array of electrode name strings.
-                    May be omitted or passed as {} to defer. If the electrode
-                    localization pipeline runs, a file dialog will prompt for
-                    channel names just before the naming GUI. Accepted formats:
-                    .mat (cell array), .csv (first column), .fif (MNE/FieldTrip
-                    header). Dismiss to proceed without channel names (names can
-                    still be entered manually in the naming GUI).
+   Channel names are not a constructor argument. If the electrode
+   localization create pipeline runs, a file dialog prompts for them just
+   before the naming GUI. Accepted formats: .mat (cell array), .csv (first
+   column), .fif (MNE/FieldTrip header). Dismiss to skip (names can be
+   entered manually in the GUI, or assigned later via sl.chanNames).
 
    Optional name-value argument:
       'forceNewElectrodeLocalizer', true  — re-run electrode localization even

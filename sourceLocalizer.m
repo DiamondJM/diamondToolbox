@@ -55,19 +55,16 @@ classdef sourceLocalizer < handle
             %               <subj>/
             %                   tal/
             %
-            % Optional positional:
-            %   chanNames  - m x 1 cell array of channel name strings.
-            %                If not provided, a file dialog will prompt to
-            %                load from a .mat or .csv file. Dismiss the
-            %                dialog to leave chanNames empty (no dropdown
-            %                in the electrode naming GUI).
-            %
             % Optional name-value:
             %   forceNewElectrodeLocalizer - If true, re-run electrode
             %       localization even if tal/leads.csv already exists.
             %       Default: false.
             %
             % Note:
+            %   Channel names are prompted during the electrode localization
+            %   create pipeline (just before the naming GUI). They can also
+            %   be assigned directly at any time via sl.chanNames.
+            %
             %   timeSeries and Fs are NOT constructor arguments. Either
             %   assign them directly after construction:
             %       sl.timeSeries = myData;   % [samples x channels]
@@ -77,24 +74,21 @@ classdef sourceLocalizer < handle
             %   Then call sl.localizationManager().
 
             p = inputParser;
-            addOptional(p, 'chanNames', {});
             addParameter(p, 'forceNewElecLoc', false);
             parse(p, varargin{:});
-            chanNames              = p.Results.chanNames;
-            forceNewElecLoc        = p.Results.forceNewElecLoc;
+            forceNewElecLoc = p.Results.forceNewElecLoc;
 
             toolboxRoot = fileparts(mfilename('fullpath'));
             addpath(genpath(toolboxRoot));
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
-
-            self.chanNames = chanNames;
+            self.chanNames  = {};
 
             %% Electrode localization
 
             self.electrodeLocalizer = electrodeLocalizer( ...
-                subj, rootFolder, chanNames, 'forceNew', forceNewElecLoc);
+                subj, rootFolder, {}, 'forceNew', forceNewElecLoc);
 
             %% Pull braindata
             self.retrieveBraindata;
