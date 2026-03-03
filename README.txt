@@ -64,7 +64,7 @@ For electrodeLocalizer (electrode localization from imaging)
 
 Note: FreeSurfer and AFNI are invoked automatically from within MATLAB via
 system calls. The user does not need to leave MATLAB at any point. FreeSurfer
-surface reconstruction (recon-all) takes approximately 6–10 hours and runs
+surface reconstruction (recon-all) takes approximately 8–10+ hours and runs
 unattended. Binary paths for FreeSurfer and AFNI can be configured via
 constructor arguments (see electrodeLocalizer section below).
 
@@ -117,9 +117,12 @@ Step 2 — Construct a sourceLocalizer object:
 
    Optional positional argument:
       chanNames   — [m x 1] cell array of electrode name strings.
-                    If omitted, a file dialog prompts for a .mat or .csv file
-                    containing the channel list. Dismiss the dialog to proceed
-                    without channel names (no dropdown in the naming GUI).
+                    May be omitted or passed as {} to defer. If the electrode
+                    localization pipeline runs, a file dialog will prompt for
+                    channel names just before the naming GUI. Accepted formats:
+                    .mat (cell array), .csv (first column), .fif (MNE/FieldTrip
+                    header). Dismiss to proceed without channel names (names can
+                    still be entered manually in the naming GUI).
 
    Optional name-value argument:
       'forceNewElectrodeLocalizer', true  — re-run electrode localization even
@@ -179,7 +182,7 @@ is safe to interrupt and resume.
                                copies selected files to expected locations
   Stage 3  runSurface          FreeSurfer recon-all surface reconstruction
                                + pial-outer-smoothed cortical envelope
-                               (~6–10 hours, runs unattended)
+                               (~8–10+ hours, runs unattended)
   Stage 4  runSuma             AFNI/SUMA standard ld141 mesh → gifti files
                                (198,812 vertices per hemisphere)
   Stage 5  coregisterCT        AFNI rigid-body CT-to-MR coregistration via
@@ -233,18 +236,18 @@ IMPORTING EXISTING FILES
 If leads.csv and gifti surface files already exist from a prior localization
 pipeline, they can be imported directly without running the imaging pipeline.
 
-During construction, if required files are missing, a dialog offers:
-  [Run Pipeline]         Run the full electrodeLocalizer pipeline
-  [Import Existing Files] Point to existing leads.csv and/or surfaces
-  [Cancel]
+During construction, if required files are missing, a setup dialog appears
+showing the status of all 5 required files (leads.csv and the 4 surface
+GIFTIs). The dialog offers three actions:
 
-Import can also be called at any time independently:
+  [Create]  Run the full electrodeLocalizer pipeline from imaging data
+  [Import]  Import the currently selected file via a file browser;
+            the row updates to [OK] inline — repeat for each file
+  [Cancel]  Abort construction
 
-      sl.electrodeLocalizer.importExistingLocalization()
-
-This opens file dialogs for each missing file independently. Dismissing a
-dialog skips that file, so partial imports are valid (e.g. import surfaces
-now and leads.csv later).
+Files can be imported in any order. Once all 5 are present and [Create] is
+clicked (or construction is restarted), the pipeline skips any stage whose
+outputs are already in place.
 
 Files that can be imported
 --------------------------
