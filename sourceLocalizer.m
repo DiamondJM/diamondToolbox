@@ -75,9 +75,9 @@ classdef sourceLocalizer < handle
             %   Then call sl.localizationManager().
 
             p = inputParser;
-            addParameter(p, 'forceNewElecLoc', false);
+            addParameter(p, 'forceNewElectrodeLocalizer', false);
             parse(p, varargin{:});
-            forceNewElecLoc = p.Results.forceNewElecLoc;
+            forceNewElectrodeLocalizer = p.Results.forceNewElectrodeLocalizer;
 
             toolboxRoot = fileparts(mfilename('fullpath'));
             addpath(genpath(toolboxRoot));
@@ -89,7 +89,7 @@ classdef sourceLocalizer < handle
             %% Electrode localization
 
             self.electrodeLocalizer = electrodeLocalizer( ...
-                subj, rootFolder, {}, 'forceNew', forceNewElecLoc);
+                subj, rootFolder, {}, 'forceNew', forceNewElectrodeLocalizer);
 
             %% Pull braindata
             self.retrieveBraindata;
