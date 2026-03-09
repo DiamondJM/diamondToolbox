@@ -355,6 +355,16 @@ classdef sourceLocalizer < handle
 
             if ~isempty(self.spikeDetectionResults.rasters) && ~forceNew; return; end
 
+            assert(~isempty(self.timeSeries),'Time series empty.'); 
+            %  Please assign timeSeries and Fs directly after construction:
+            %       sl.timeSeries = myData;   % [samples x channels]
+            %       sl.Fs         = 1000;     % Hz
+            %   or load from a file via dialog (.mat, .edf, .fif):
+            %       sl.loadTimeSeries()
+            %   Then call sl.localizationManager().
+
+            self.timeSeries = zscore(self.timeSeries);
+
             %% Define parameters
 
             self.spikeDetectionResults.paramStruct = struct(...
