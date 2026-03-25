@@ -52,7 +52,7 @@ classdef electrodeLocalizer < handle
     end
 
     properties (Constant)
-        CT_HU_THRESHOLD          = 2500;  % HU threshold for electrode detection (Hounsfield units)
+        CT_HU_THRESHOLD          = 1800;  % HU threshold for electrode detection (Hounsfield units)
                                          %   1500: skull forms one huge connected blob (293K voxels)
                                          %         that swallows top-of-head contacts via guide bolts
                                          %   2000: skull separates but contact blooms touch/merge on
@@ -150,11 +150,15 @@ classdef electrodeLocalizer < handle
             % Optional name-value:
             %   forceNew - re-run all stages (default false); individual
             %              stages always check their own outputs first.
+            %   manual   - if true, replace auto-detect + naming GUI with
+            %              the CT slicer manual localization GUI (default false).
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
+            addParameter(p, 'manual',   false);
             parse(p, varargin{:});
-            forceNew = p.Results.forceNew;
+            forceNew  = p.Results.forceNew;
+            useManual = p.Results.manual;
 
             fprintf('\n+----------------------------------------------------------+\n');
             fprintf('|            electrodeLocalizer — %s\n', self.subj);
@@ -179,11 +183,15 @@ classdef electrodeLocalizer < handle
             self.runSurface();           % never force — recon-all takes hours
             self.runSuma();              % never force — SUMA takes minutes
             self.coregisterCT('forceNew', forceNew);
-            self.detectElectrodes('forceNew', forceNew);
             if isempty(self.chanNames)
                 self.chanNames = sourceLocalizer.loadChanNamesFromFile();
             end
-            self.namingGUI();
+            if useManual
+                self.manualLocalize();
+            else
+                self.detectElectrodes('forceNew', forceNew);
+                self.namingGUI();
+            end
             self.projectElectrodes();
             self.writeLeads();
         end
@@ -401,7 +409,7 @@ classdef electrodeLocalizer < handle
             %   .nii.gz  — decompressed via MATLAB gunzip.
             %   .mgz     — converted via FreeSurfer mri_convert (uses fsBin).
 
-            filter = {'*.nii;*.nii.gz;*.mgz', 'Imaging files (*.nii, *.nii.gz, *.mgz)'};
+            filter = {'*.*', 'All files (*.nii, *.nii.gz, *.mgz)'};
 
             mrDest  = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
             ctDest  = fullfile(self.locDirs.ct_1,   'ct_implant.nii');
@@ -1099,6 +1107,672 @@ classdef electrodeLocalizer < handle
             end
 
         end
+
+        % -----------------------------------------------------------------
+        %% Stage 6+7 (manual) — CT slicer + 3-D review
+        % -----------------------------------------------------------------
+
+        function manualLocalize(self)
+            % Replaces detectElectrodes (Stage 6) + namingGUI (Stage 7).
+            % Presents a three-panel CT slice viewer; user clicks contacts,
+            % names each one, then reviews placements in 3-D.
+            % Results stored in self.leads (chanName, x, y, z, type).
+
+            ctFile = fullfile(self.locDirs.ct_1_xfm, 'ct_implant.nii');
+            assert(exist(ctFile,'file')==2, ...
+                '[manualLocalize] Coregistered CT not found: %s\nRun coregisterCT first.', ctFile);
+
+            % ---- Load CT ----
+            info = niftiinfo(ctFile);
+            vol  = double(niftiread(info));          % [nx, ny, nz]
+            Txfm = info.Transform.T;                 % 4×4 MATLAB affine (1-based vox → world)
+            [nx, ny, nz] = size(vol);
+
+            % vox2mm: 1-based [i,j,k] row-vector → world mm row-vector
+            vox2mm = @(v) ([v, 1] * Txfm);
+
+            % ---- Sort chanNames (same logic as namingGUI) ----
+            sortedChanNames = self.chanNames;
+            if ~isempty(sortedChanNames)
+                toks = regexp(sortedChanNames, '^(.*)\s+(\d+)$', 'tokens', 'once');
+                valid_tok = ~cellfun(@isempty, toks);
+                keys = sortedChanNames;
+                keys(valid_tok) = cellfun( ...
+                    @(t) sprintf('%s_%05d', t{1}, str2double(t{2})), ...
+                    toks(valid_tok), 'UniformOutput', false);
+                [~, si] = sort(keys);
+                sortedChanNames = sortedChanNames(si);
+            end
+
+            % ---- Mutable state shared across GUI and restart loops ----
+            markers = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
+
+            % ---- Main loop: slicer → 3-D review → restart or proceed ----
+            while true
+                markers = runSlicerGUI(markers);
+                if isempty(markers) && nargout == 0
+                    error('electrodeLocalizer:cancelled', ...
+                        '[manualLocalize] Cancelled — no markers placed.');
+                end
+                action = run3DReview(markers);
+                if strcmp(action, 'proceed')
+                    break;
+                end
+                % 'restart' → loop back to slicer with markers preserved
+            end
+
+            % ---- Build self.leads ----
+            N = numel(markers);
+            chanNames_out = {markers.chanName}';
+            types_out     = {markers.type}';
+            xyz = [[markers.x]', [markers.y]', [markers.z]'];
+            self.clusters = xyz;
+            self.leads = table(chanNames_out, xyz(:,1), xyz(:,2), xyz(:,3), types_out, ...
+                'VariableNames', {'chanName','x','y','z','type'});
+
+            clustFile = fullfile(self.locDirs.ct_1_xfm, 'clusters_mr.mat');
+            clusters_mm = xyz;                                       %#ok<NASGU>
+            save(clustFile, 'clusters_mm');
+            fprintf('[manualLocalize] %d contacts saved.\n', N);
+
+            % ==============================================================
+            % Nested: CT slicer GUI
+            % ==============================================================
+            function markersOut = runSlicerGUI(markersIn)
+
+                % ---- State ----
+                curVox = [round(nx/2), round(ny/2), round(nz/2)];
+                wW = 3000;  wL = 700;
+                mode = 'normal';   % 'normal' | 'pan' | 'zoom'
+                dragStart   = [];  % for pan
+                dragLimX    = [];
+                dragLimY    = [];
+                dragAxes    = [];
+                markersOut  = markersIn;
+                pendingPos  = [];   % voxel [ix,iy,iz] awaiting name entry
+
+                % ---- Color scheme ----
+                bg  = [0.12 0.12 0.12];
+                bg2 = [0.18 0.18 0.18];
+                bg3 = [0.22 0.22 0.22];
+                fg  = [0.92 0.92 0.92];
+                acc = [0  0.9 0.9];    % cyan accent
+
+                % ---- Figure ----
+                fig = figure('Name', sprintf('CT Slicer — %s', self.subj), ...
+                    'NumberTitle','off','Color',bg, ...
+                    'Position',[30 30 1500 870], ...
+                    'KeyPressFcn',@cbKey, ...
+                    'WindowScrollWheelFcn',@cbScroll, ...
+                    'WindowButtonDownFcn',@cbDown, ...
+                    'WindowButtonMotionFcn',@cbMotion, ...
+                    'WindowButtonUpFcn',@cbUp, ...
+                    'CloseRequestFcn',@cbClose);
+
+                % ---- Toolbar strip (top, left 75%) ----
+                tbY = 0.935;  tbH = 0.055;
+                uicontrol(fig,'Style','text','String','Mode:', ...
+                    'Units','normalized','Position',[0.01 tbY 0.04 tbH], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+                btnNormal = uicontrol(fig,'Style','togglebutton','String','Normal', ...
+                    'Units','normalized','Position',[0.05 tbY 0.07 tbH], ...
+                    'BackgroundColor',[0.25 0.55 0.25],'ForegroundColor','w', ...
+                    'FontSize',10,'Value',1,'Callback',@(~,~) setMode('normal'));
+                btnPan = uicontrol(fig,'Style','togglebutton','String','Pan', ...
+                    'Units','normalized','Position',[0.13 tbY 0.06 tbH], ...
+                    'BackgroundColor',bg2,'ForegroundColor',fg, ...
+                    'FontSize',10,'Value',0,'Callback',@(~,~) setMode('pan'));
+                btnZoom = uicontrol(fig,'Style','togglebutton','String','Zoom', ...
+                    'Units','normalized','Position',[0.20 tbY 0.06 tbH], ...
+                    'BackgroundColor',bg2,'ForegroundColor',fg, ...
+                    'FontSize',10,'Value',0,'Callback',@(~,~) setMode('zoom'));
+
+                uicontrol(fig,'Style','text','String','W:', ...
+                    'Units','normalized','Position',[0.30 tbY 0.025 tbH], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+                hW = uicontrol(fig,'Style','edit','String',num2str(wW), ...
+                    'Units','normalized','Position',[0.325 tbY 0.055 tbH], ...
+                    'BackgroundColor',bg3,'ForegroundColor',fg, ...
+                    'FontSize',10,'Callback',@cbWL);
+                uicontrol(fig,'Style','text','String','L:', ...
+                    'Units','normalized','Position',[0.385 tbY 0.025 tbH], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+                hL = uicontrol(fig,'Style','edit','String',num2str(wL), ...
+                    'Units','normalized','Position',[0.41 tbY 0.055 tbH], ...
+                    'BackgroundColor',bg3,'ForegroundColor',fg, ...
+                    'FontSize',10,'Callback',@cbWL);
+
+                uicontrol(fig,'Style','pushbutton','String','Reset View', ...
+                    'Units','normalized','Position',[0.50 tbY 0.07 tbH], ...
+                    'BackgroundColor',bg2,'ForegroundColor',fg, ...
+                    'FontSize',10,'Callback',@cbResetView);
+
+                % ---- Slice panels ----
+                panW = 0.235;  panH = 0.875;  panY = 0.045;
+                axAx  = axes('Parent',fig,'Position',[0.005 panY panW panH], ...
+                    'Color','k','XColor','none','YColor','none'); hold(axAx,'on');
+                axCor = axes('Parent',fig,'Position',[0.248 panY panW panH], ...
+                    'Color','k','XColor','none','YColor','none'); hold(axCor,'on');
+                axSag = axes('Parent',fig,'Position',[0.491 panY panW panH], ...
+                    'Color','k','XColor','none','YColor','none'); hold(axSag,'on');
+
+                % Image handles (replaced on each refresh)
+                hImAx  = []; hImCor = []; hImSag = [];
+
+                % Crosshair handles
+                hXHax  = [];  hXHcor = [];  hXHsag = [];
+
+                % Marker scatter handles
+                hMkAx  = [];  hMkCor = [];  hMkSag = [];
+
+                % Slice index labels
+                hTitleAx  = title(axAx,  '','Color',fg,'FontSize',9);
+                hTitleCor = title(axCor, '','Color',fg,'FontSize',9);
+                hTitleSag = title(axSag, '','Color',fg,'FontSize',9);
+
+                % Status bar
+                hStatus = uicontrol(fig,'Style','text', ...
+                    'Units','normalized','Position',[0.005 0.003 0.73 0.038], ...
+                    'BackgroundColor',bg,'ForegroundColor',[0.5 0.8 1.0], ...
+                    'FontSize',10,'HorizontalAlignment','left','String','Click on a contact location');
+
+                % ---- Right panel ----
+                rx = 0.742;  rw = 0.253;
+                uicontrol(fig,'Style','text','String','CT Slicer', ...
+                    'Units','normalized','Position',[rx 0.94 rw 0.05], ...
+                    'BackgroundColor',bg,'ForegroundColor',acc, ...
+                    'FontSize',14,'FontWeight','bold','HorizontalAlignment','center');
+
+                uicontrol(fig,'Style','text','String','Channel name:', ...
+                    'Units','normalized','Position',[rx 0.89 rw 0.04], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg, ...
+                    'FontSize',10,'HorizontalAlignment','left');
+                hList = uicontrol(fig,'Style','listbox', ...
+                    'Units','normalized','Position',[rx 0.68 rw 0.21], ...
+                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',11,'String',{});
+                uicontrol(fig,'Style','text','String','Or type name:', ...
+                    'Units','normalized','Position',[rx 0.635 rw 0.04], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg, ...
+                    'FontSize',10,'HorizontalAlignment','left');
+                hEdit = uicontrol(fig,'Style','edit', ...
+                    'Units','normalized','Position',[rx 0.585 rw 0.048], ...
+                    'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
+                    'FontSize',11,'HorizontalAlignment','left','String','');
+                uicontrol(fig,'Style','text','String','Electrode type:', ...
+                    'Units','normalized','Position',[rx 0.54 rw 0.04], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg, ...
+                    'FontSize',10,'HorizontalAlignment','left');
+                hType = uicontrol(fig,'Style','popupmenu', ...
+                    'Units','normalized','Position',[rx 0.49 rw 0.048], ...
+                    'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
+                    'FontSize',11,'String',{'depth','subdural'},'Value',1);
+                hPlaceBtn = uicontrol(fig,'Style','pushbutton', ...
+                    'String','Place Marker', ...
+                    'Units','normalized','Position',[rx 0.42 rw 0.063], ...
+                    'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
+                    'FontSize',12,'FontWeight','bold','Enable','off','Callback',@cbPlace);
+
+                uicontrol(fig,'Style','text','String','Placed markers:', ...
+                    'Units','normalized','Position',[rx 0.37 rw 0.04], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg, ...
+                    'FontSize',10,'HorizontalAlignment','left');
+                hMkList = uicontrol(fig,'Style','listbox', ...
+                    'Units','normalized','Position',[rx 0.19 rw 0.18], ...
+                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',10,'String',{});
+                uicontrol(fig,'Style','pushbutton','String','Remove Selected', ...
+                    'Units','normalized','Position',[rx 0.13 rw 0.056], ...
+                    'BackgroundColor',[0.48 0.18 0.18],'ForegroundColor','w', ...
+                    'FontSize',10,'Callback',@cbRemove);
+                uicontrol(fig,'Style','pushbutton','String','Done', ...
+                    'Units','normalized','Position',[rx 0.02 rw 0.09], ...
+                    'BackgroundColor',[0.20 0.38 0.58],'ForegroundColor','w', ...
+                    'FontSize',13,'FontWeight','bold','Callback',@cbDone);
+
+                refreshAll();
+                waitfor(fig);
+
+                % ---- Helpers ----
+                function setMode(m)
+                    mode = m;
+                    set(btnNormal,'Value', strcmp(m,'normal'), ...
+                        'BackgroundColor', ternary(strcmp(m,'normal'),[0.25 0.55 0.25],bg2));
+                    set(btnPan,   'Value', strcmp(m,'pan'), ...
+                        'BackgroundColor', ternary(strcmp(m,'pan'),  [0.50 0.40 0.10],bg2));
+                    set(btnZoom,  'Value', strcmp(m,'zoom'), ...
+                        'BackgroundColor', ternary(strcmp(m,'zoom'), [0.10 0.35 0.55],bg2));
+                end
+
+                function v = ternary(cond, a, b)
+                    if cond, v = a; else, v = b; end
+                end
+
+                function ax = hitAxes(pt)
+                    % pt = figure CurrentPoint [x y] pixels
+                    figPos = get(fig,'Position');
+                    np = pt ./ figPos(3:4);
+                    ax = [];
+                    for aa = [axAx, axCor, axSag]
+                        apos = get(aa,'Position');
+                        if np(1) >= apos(1) && np(1) <= apos(1)+apos(3) && ...
+                           np(2) >= apos(2) && np(2) <= apos(2)+apos(4)
+                            ax = aa;
+                            return;
+                        end
+                    end
+                end
+
+                function [dp, valid] = axesDataPoint(ax)
+                    cp = get(ax,'CurrentPoint');
+                    dp = cp(1,1:2);
+                    xl = get(ax,'XLim');  yl = get(ax,'YLim');
+                    valid = dp(1)>=xl(1) && dp(1)<=xl(2) && dp(2)>=yl(1) && dp(2)<=yl(2);
+                end
+
+                function refreshAll()
+                    if ~ishandle(fig), return; end
+                    clim_lo = wL - wW/2;
+                    clim_hi = wL + wW/2;
+
+                    % Axial: show vol(:,:,iz) transposed → x horizontal, y vertical
+                    sl_ax = vol(:,:,curVox(3))';
+                    if isempty(hImAx) || ~ishandle(hImAx)
+                        hImAx = imagesc(axAx, sl_ax, [clim_lo clim_hi]);
+                        colormap(axAx, gray);
+                        axis(axAx,'image','xy');
+                        set(hImAx,'ButtonDownFcn',@cbClickAx);
+                    else
+                        set(hImAx,'CData',sl_ax,'CLim',[clim_lo clim_hi]);
+                        clim(axAx,[clim_lo clim_hi]);
+                    end
+                    set(hTitleAx,'String',sprintf('AXIAL   z=%d/%d',curVox(3),nz));
+
+                    % Coronal: vol(:,iy,:) transposed → x horizontal, z vertical (flip for S-up)
+                    sl_cor = flipud(squeeze(vol(:,curVox(2),:))');
+                    if isempty(hImCor) || ~ishandle(hImCor)
+                        hImCor = imagesc(axCor, sl_cor, [clim_lo clim_hi]);
+                        colormap(axCor, gray);
+                        axis(axCor,'image','xy');
+                        set(hImCor,'ButtonDownFcn',@cbClickCor);
+                    else
+                        set(hImCor,'CData',sl_cor,'CLim',[clim_lo clim_hi]);
+                        clim(axCor,[clim_lo clim_hi]);
+                    end
+                    set(hTitleCor,'String',sprintf('CORONAL   y=%d/%d',curVox(2),ny));
+
+                    % Sagittal: vol(ix,:,:) transposed → y horizontal, z vertical (flip for S-up)
+                    sl_sag = flipud(squeeze(vol(curVox(1),:,:))');
+                    if isempty(hImSag) || ~ishandle(hImSag)
+                        hImSag = imagesc(axSag, sl_sag, [clim_lo clim_hi]);
+                        colormap(axSag, gray);
+                        axis(axSag,'image','xy');
+                        set(hImSag,'ButtonDownFcn',@cbClickSag);
+                    else
+                        set(hImSag,'CData',sl_sag,'CLim',[clim_lo clim_hi]);
+                        clim(axSag,[clim_lo clim_hi]);
+                    end
+                    set(hTitleSag,'String',sprintf('SAGITTAL   x=%d/%d',curVox(1),nx));
+
+                    refreshCrosshairs();
+                    refreshMarkers();
+
+                    mm = vox2mm(curVox);
+                    set(hStatus,'String', ...
+                        sprintf('  vox [%d, %d, %d]    x=%.1f  y=%.1f  z=%.1f mm', ...
+                        curVox(1),curVox(2),curVox(3), mm(1),mm(2),mm(3)));
+                end
+
+                function refreshCrosshairs()
+                    if ~ishandle(fig), return; end
+                    % Axial crosshair: vertical at ix, horizontal at iy
+                    if ~isempty(hXHax) && all(ishandle(hXHax))
+                        delete(hXHax);
+                    end
+                    hXHax(1) = plot(axAx, [curVox(1) curVox(1)], [0.5 ny+0.5], ...
+                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                    hXHax(2) = plot(axAx, [0.5 nx+0.5], [curVox(2) curVox(2)], ...
+                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+
+                    % Coronal crosshair: vertical at ix, horizontal at (flipped) iz
+                    iz_cor = nz - curVox(3) + 1;
+                    if ~isempty(hXHcor) && all(ishandle(hXHcor))
+                        delete(hXHcor);
+                    end
+                    hXHcor(1) = plot(axCor, [curVox(1) curVox(1)], [0.5 nz+0.5], ...
+                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                    hXHcor(2) = plot(axCor, [0.5 nx+0.5], [iz_cor iz_cor], ...
+                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+
+                    % Sagittal crosshair: vertical at iy, horizontal at (flipped) iz
+                    if ~isempty(hXHsag) && all(ishandle(hXHsag))
+                        delete(hXHsag);
+                    end
+                    hXHsag(1) = plot(axSag, [curVox(2) curVox(2)], [0.5 nz+0.5], ...
+                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                    hXHsag(2) = plot(axSag, [0.5 ny+0.5], [iz_cor iz_cor], ...
+                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                end
+
+                function refreshMarkers()
+                    if ~ishandle(fig), return; end
+                    if ~isempty(hMkAx)  && all(ishandle(hMkAx)),  delete(hMkAx);  end
+                    if ~isempty(hMkCor) && all(ishandle(hMkCor)), delete(hMkCor); end
+                    if ~isempty(hMkSag) && all(ishandle(hMkSag)), delete(hMkSag); end
+                    hMkAx = []; hMkCor = []; hMkSag = [];
+
+                    if isempty(markersOut), return; end
+
+                    % Convert marker world mm back to voxel for display
+                    invT = inv(Txfm);
+                    for mi = 1:numel(markersOut)
+                        mm_h = [markersOut(mi).x, markersOut(mi).y, markersOut(mi).z, 1];
+                        vx   = round(mm_h * invT');
+                        vx   = vx(1:3);
+
+                        col = ternary(strcmp(markersOut(mi).type,'depth'), ...
+                            [0.3 0.6 1.0], [0.3 1.0 0.5]);
+
+                        % Axial: plot at (vx(1), vx(2))
+                        hMkAx(end+1) = scatter(axAx, vx(1), vx(2), 60, col, ...
+                            'filled','HitTest','off'); %#ok<AGROW>
+                        hMkAx(end+1) = text(axAx, vx(1)+2, vx(2), ...
+                            markersOut(mi).chanName,'Color',col,'FontSize',7, ...
+                            'HitTest','off'); %#ok<AGROW>
+
+                        % Coronal: plot at (vx(1), flipped vx(3))
+                        iz_c = nz - vx(3) + 1;
+                        hMkCor(end+1) = scatter(axCor, vx(1), iz_c, 60, col, ...
+                            'filled','HitTest','off'); %#ok<AGROW>
+                        hMkCor(end+1) = text(axCor, vx(1)+2, iz_c, ...
+                            markersOut(mi).chanName,'Color',col,'FontSize',7, ...
+                            'HitTest','off'); %#ok<AGROW>
+
+                        % Sagittal: plot at (vx(2), flipped vx(3))
+                        hMkSag(end+1) = scatter(axSag, vx(2), iz_c, 60, col, ...
+                            'filled','HitTest','off'); %#ok<AGROW>
+                        hMkSag(end+1) = text(axSag, vx(2)+2, iz_c, ...
+                            markersOut(mi).chanName,'Color',col,'FontSize',7, ...
+                            'HitTest','off'); %#ok<AGROW>
+                    end
+
+                    % Update marker list on right panel
+                    strs = arrayfun(@(m) sprintf('%s  [%s]', m.chanName, m.type), ...
+                        markersOut, 'UniformOutput', false);
+                    set(hMkList,'String',strs,'Value',min(get(hMkList,'Value'),numel(strs)));
+
+                    % Refresh available channel names
+                    used = {markersOut.chanName};
+                    if ~isempty(sortedChanNames)
+                        rem = sortedChanNames(~ismember(sortedChanNames, used));
+                        set(hList,'String',rem(:), ...
+                            'Value',max(1,min(get(hList,'Value'),numel(rem))));
+                    end
+                end
+
+                function setPendingPos(vox)
+                    pendingPos = vox;
+                    curVox = vox;
+                    set(hPlaceBtn,'Enable','on');
+                    refreshAll();
+                end
+
+                % ---- Click callbacks for each panel ----
+                function cbClickAx(~,~)
+                    if ~strcmp(mode,'normal'), return; end
+                    [dp, valid] = axesDataPoint(axAx);
+                    if ~valid, return; end
+                    ix = max(1,min(nx, round(dp(1))));
+                    iy = max(1,min(ny, round(dp(2))));
+                    setPendingPos([ix, iy, curVox(3)]);
+                end
+                function cbClickCor(~,~)
+                    if ~strcmp(mode,'normal'), return; end
+                    [dp, valid] = axesDataPoint(axCor);
+                    if ~valid, return; end
+                    ix   = max(1,min(nx, round(dp(1))));
+                    iz_f = max(1,min(nz, round(dp(2))));
+                    iz   = nz - iz_f + 1;
+                    setPendingPos([ix, curVox(2), iz]);
+                end
+                function cbClickSag(~,~)
+                    if ~strcmp(mode,'normal'), return; end
+                    [dp, valid] = axesDataPoint(axSag);
+                    if ~valid, return; end
+                    iy   = max(1,min(ny, round(dp(1))));
+                    iz_f = max(1,min(nz, round(dp(2))));
+                    iz   = nz - iz_f + 1;
+                    setPendingPos([curVox(1), iy, iz]);
+                end
+
+                % ---- Window-level callbacks ----
+                function cbWL(~,~)
+                    wW_new = str2double(get(hW,'String'));
+                    wL_new = str2double(get(hL,'String'));
+                    if ~isnan(wW_new) && wW_new > 0, wW = wW_new; end
+                    if ~isnan(wL_new), wL = wL_new; end
+                    refreshAll();
+                end
+
+                % ---- Scroll ----
+                function cbScroll(~, evt)
+                    ax = hitAxes(get(fig,'CurrentPoint'));
+                    delta = -evt.VerticalScrollCount;
+                    if isempty(ax)
+                        return
+                    elseif strcmp(mode,'zoom') && ~isempty(ax)
+                        zoomAxes(ax, 1 + 0.15*delta);
+                        return;
+                    end
+                    if isequal(ax, axAx)
+                        curVox(3) = max(1, min(nz, curVox(3) + delta));
+                    elseif isequal(ax, axCor)
+                        curVox(2) = max(1, min(ny, curVox(2) + delta));
+                    elseif isequal(ax, axSag)
+                        curVox(1) = max(1, min(nx, curVox(1) + delta));
+                    end
+                    refreshAll();
+                end
+
+                function zoomAxes(ax, factor)
+                    cp  = get(ax,'CurrentPoint');
+                    cx  = cp(1,1);  cy = cp(1,2);
+                    xl  = get(ax,'XLim');  yl = get(ax,'YLim');
+                    nxl = cx + (xl - cx) / factor;
+                    nyl = cy + (yl - cy) / factor;
+                    set(ax,'XLim',nxl,'YLim',nyl);
+                end
+
+                % ---- Pan / drag ----
+                function cbDown(~,~)
+                    if ~strcmp(mode,'pan'), return; end
+                    ax = hitAxes(get(fig,'CurrentPoint'));
+                    if isempty(ax), return; end
+                    dragAxes  = ax;
+                    cp = get(ax,'CurrentPoint');
+                    dragStart = cp(1,1:2);
+                    dragLimX  = get(ax,'XLim');
+                    dragLimY  = get(ax,'YLim');
+                end
+                function cbMotion(~,~)
+                    if ~strcmp(mode,'pan') || isempty(dragStart), return; end
+                    cp    = get(dragAxes,'CurrentPoint');
+                    delta = cp(1,1:2) - dragStart;
+                    set(dragAxes,'XLim', dragLimX - delta(1), 'YLim', dragLimY - delta(2));
+                end
+                function cbUp(~,~)
+                    dragStart = []; dragAxes = []; dragLimX = []; dragLimY = [];
+                end
+
+                % ---- Reset view ----
+                function cbResetView(~,~)
+                    axis(axAx,  'image','xy');
+                    axis(axCor, 'image','xy');
+                    axis(axSag, 'image','xy');
+                end
+
+                % ---- Keyboard shortcuts ----
+                function cbKey(~, evt)
+                    switch evt.Key
+                        case 'uparrow'
+                            ax = hitAxes(get(fig,'CurrentPoint'));
+                            if isequal(ax,axAx)
+                                curVox(3) = min(nz, curVox(3)+1);
+                            elseif isequal(ax,axCor)
+                                curVox(2) = min(ny, curVox(2)+1);
+                            elseif isequal(ax,axSag)
+                                curVox(1) = min(nx, curVox(1)+1);
+                            end
+                            refreshAll();
+                        case 'downarrow'
+                            ax = hitAxes(get(fig,'CurrentPoint'));
+                            if isequal(ax,axAx)
+                                curVox(3) = max(1, curVox(3)-1);
+                            elseif isequal(ax,axCor)
+                                curVox(2) = max(1, curVox(2)-1);
+                            elseif isequal(ax,axSag)
+                                curVox(1) = max(1, curVox(1)-1);
+                            end
+                            refreshAll();
+                    end
+                end
+
+                % ---- Place marker ----
+                function cbPlace(~,~)
+                    if isempty(pendingPos), return; end
+                    name = strtrim(get(hEdit,'String'));
+                    if isempty(name)
+                        listStr = get(hList,'String');
+                        if ~isempty(listStr)
+                            name = listStr{max(1, get(hList,'Value'))};
+                        end
+                    end
+                    if isempty(name)
+                        msgbox('Enter a channel name or select from the list.','','warn');
+                        return;
+                    end
+                    typeStrs = get(hType,'String');
+                    typ      = typeStrs{get(hType,'Value')};
+                    mm       = vox2mm(pendingPos);
+                    markersOut(end+1) = struct('chanName',name,'type',typ, ...
+                        'x',mm(1),'y',mm(2),'z',mm(3));
+                    set(hEdit,'String','');
+                    pendingPos = [];
+                    set(hPlaceBtn,'Enable','off');
+                    refreshMarkers();
+                end
+
+                % ---- Remove marker ----
+                function cbRemove(~,~)
+                    if isempty(markersOut), return; end
+                    idx = get(hMkList,'Value');
+                    if idx < 1 || idx > numel(markersOut), return; end
+                    markersOut(idx) = [];
+                    set(hMkList,'Value', max(1, idx-1));
+                    refreshMarkers();
+                end
+
+                % ---- Done / close ----
+                function cbDone(~,~)
+                    if numel(markersOut) == 0
+                        choice = questdlg('No markers placed. Exit anyway?', ...
+                            'No Markers','Exit','Cancel','Cancel');
+                        if ~strcmp(choice,'Exit'), return; end
+                    end
+                    delete(fig);
+                end
+                function cbClose(~,~)
+                    delete(fig);
+                end
+
+            end  % runSlicerGUI
+
+            % ==============================================================
+            % Nested: 3-D review
+            % ==============================================================
+            function action = run3DReview(mkrs)
+                action = 'restart';   % default if window is closed
+
+                if isempty(mkrs)
+                    action = 'restart';
+                    return;
+                end
+
+                sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
+                lhFile  = fullfile(sumaDir, 'lh.pial.gii');
+                rhFile  = fullfile(sumaDir, 'rh.pial.gii');
+
+                bg  = [0.12 0.12 0.12];
+                fg  = [0.92 0.92 0.92];
+
+                fig3 = figure('Name', sprintf('3-D Review — %s', self.subj), ...
+                    'NumberTitle','off','Color',bg, ...
+                    'Position',[100 80 1200 820], ...
+                    'CloseRequestFcn',@(~,~) delete(fig3));
+
+                ax3 = axes('Parent',fig3,'Position',[0.01 0.01 0.73 0.97], ...
+                    'Color','k','XColor','none','YColor','none','ZColor','none');
+                hold(ax3,'on'); axis(ax3,'equal','off');
+                view(ax3,3); camlight(ax3,'headlight'); material(ax3,'dull');
+
+                if exist(lhFile,'file')==2
+                    lhS = gifti(lhFile);
+                    patch(ax3,'Faces',lhS.faces,'Vertices',lhS.vertices, ...
+                        'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
+                        'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
+                end
+                if exist(rhFile,'file')==2
+                    rhS = gifti(rhFile);
+                    patch(ax3,'Faces',rhS.faces,'Vertices',rhS.vertices, ...
+                        'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
+                        'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
+                end
+
+                for mi = 1:numel(mkrs)
+                    col = ternary3(strcmp(mkrs(mi).type,'depth'), ...
+                        [0.3 0.6 1.0], [0.3 1.0 0.5]);
+                    scatter3(ax3, mkrs(mi).x, mkrs(mi).y, mkrs(mi).z, ...
+                        80, col, 'filled','HitTest','off');
+                    text(ax3, mkrs(mi).x+1, mkrs(mi).y, mkrs(mi).z, ...
+                        mkrs(mi).chanName,'Color',col,'FontSize',8,'HitTest','off');
+                end
+                rotate3d(ax3,'on');
+
+                function v = ternary3(cond,a,b)
+                    if cond, v=a; else, v=b; end
+                end
+
+                % Right panel
+                rx = 0.755;  rw = 0.235;
+                uicontrol(fig3,'Style','text','String','Review Placements', ...
+                    'Units','normalized','Position',[rx 0.88 rw 0.06], ...
+                    'BackgroundColor',bg,'ForegroundColor',[0 0.9 0.9], ...
+                    'FontSize',13,'FontWeight','bold','HorizontalAlignment','center');
+                uicontrol(fig3,'Style','text', ...
+                    'String',sprintf('%d contacts placed.\n\nDrag to rotate.\nVerify positions\nthen Proceed.', numel(mkrs)), ...
+                    'Units','normalized','Position',[rx 0.65 rw 0.22], ...
+                    'BackgroundColor',bg,'ForegroundColor',fg, ...
+                    'FontSize',11,'HorizontalAlignment','center');
+                uicontrol(fig3,'Style','pushbutton','String','Proceed', ...
+                    'Units','normalized','Position',[rx 0.45 rw 0.10], ...
+                    'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
+                    'FontSize',13,'FontWeight','bold','Callback',@cbProceed);
+                uicontrol(fig3,'Style','pushbutton','String','Restart Slicer', ...
+                    'Units','normalized','Position',[rx 0.32 rw 0.10], ...
+                    'BackgroundColor',[0.40 0.20 0.10],'ForegroundColor','w', ...
+                    'FontSize',12,'Callback',@cbRestart);
+
+                waitfor(fig3);
+
+                function cbProceed(~,~)
+                    action = 'proceed';
+                    delete(fig3);
+                end
+                function cbRestart(~,~)
+                    action = 'restart';
+                    delete(fig3);
+                end
+            end  % run3DReview
+
+        end  % manualLocalize
 
         % -----------------------------------------------------------------
         %% Stage 8 — project subdural contacts to pial surface

@@ -2026,6 +2026,7 @@ classdef sourceLocalizer < handle
             %   .fif — reads header only via FieldTrip ft_read_header;
             %          accepts both head-only files (e.g. *-head.fif) and
             %          full data files. Requires FieldTrip on the path.
+            %   .edf — reads header only via edfinfo (R2023a+); no data loaded.
 
             chanNames = {};
 
@@ -2036,7 +2037,8 @@ classdef sourceLocalizer < handle
                      'Accepted formats:', ...
                      '  .mat  — MATLAB workspace containing a cell array of strings', ...
                      '  .csv  — name/chanName/label column, or first column if no header', ...
-                     '  .fif  — MNE/FieldTrip file; channel names read from header'}, ...
+                     '  .fif  — MNE/FieldTrip file; channel names read from header', ...
+                     '  .edf  — EDF/EDF+ file; channel names read from header only'}, ...
                     'Channel Names', ...
                     'Browse...', 'Skip');
 
@@ -2045,7 +2047,7 @@ classdef sourceLocalizer < handle
                 end
 
                 [fname, fpath] = uigetfile( ...
-                    {'*.mat;*.csv;*.fif', 'Channel names file (*.mat, *.csv, *.fif)'}, ...
+                    {'*.mat;*.csv;*.fif;*.edf', 'Channel names file (*.mat, *.csv, *.fif, *.edf)'}, ...
                     'Select channel names file');
 
                 if ~isequal(fname, 0), break; end
@@ -2094,8 +2096,12 @@ classdef sourceLocalizer < handle
                 hdr       = ft_read_header(fullPath);
                 chanNames = hdr.label;
 
+            elseif strcmpi(ext, '.edf')
+                info      = edfinfo(fullPath);
+                chanNames = cellstr(info.SignalLabels);
+
             else
-                error('Unsupported file type: %s. Use .mat, .csv, or .fif.', ext);
+                error('Unsupported file type: %s. Use .mat, .csv, .fif, or .edf.', ext);
             end
 
             % Normalise to column cell array of char
