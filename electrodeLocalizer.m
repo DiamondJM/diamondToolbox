@@ -155,7 +155,7 @@ classdef electrodeLocalizer < handle
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'manual',   false);
+            addParameter(p, 'manual',   true);
             parse(p, varargin{:});
             forceNew  = p.Results.forceNew;
             useManual = p.Results.manual;
