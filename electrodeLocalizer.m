@@ -102,8 +102,8 @@ classdef electrodeLocalizer < handle
             addParameter(p, 'afni_bin',       electrodeLocalizer.AFNI_BIN_DEFAULT);
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
-            self.fsBin   = p.Results.freesurfer_bin;
-            self.afniBin = p.Results.afni_bin;
+            self.fsBin      = p.Results.freesurfer_bin;
+            self.afniBin    = p.Results.afni_bin;
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
@@ -165,7 +165,7 @@ classdef electrodeLocalizer < handle
             fprintf('+----------------------------------------------------------+\n');
 
             % Short-circuit if everything is already in place.
-            if self.isComplete(), return; end
+            if ~forceNew && self.isComplete(), return; end
 
             % Show setup dialog.  Imports are handled inline; dialog only
             % closes when the user clicks Create or Cancel.
@@ -495,24 +495,45 @@ classdef electrodeLocalizer < handle
 
             mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
 
-            % create_surf decides whether to skip recon-all by checking if
-            % the subject folder is non-empty — but localizer_create_directories
-            % already created that folder (empty), which create_surf handles.
-            % If a prior partial run left files there WITHOUT a completed
-            % lh.pial, create_surf would skip recon-all and crash on the
-            % envelope step.  Detect and clean up that state here.
-            rawPial = fullfile(self.locDirs.fs_subj, 'surf', 'lh.pial');
+            rawPial   = fullfile(self.locDirs.fs_subj, 'surf', 'lh.pial');
             reconDone = exist(rawPial, 'file') == 2;
             fsSubjDir = self.locDirs.fs_subj;
             subjHasFiles = exist(fsSubjDir, 'dir') == 7 && numel(dir(fsSubjDir)) > 2;
+
+            % If a prior partial run exists, resume it with -no-isrunning
+            % rather than deleting it.  Deleting would throw away hours of
+            % completed recon-all stages.  recon-all -no-isrunning -all
+            % skips already-finished steps and continues from where it left off.
+            isRunningFile = fullfile(self.locDirs.fs_subj, 'scripts', 'IsRunning.lh+rh');
             if subjHasFiles && ~reconDone
-                fprintf('[Stage 3] Partial FreeSurfer output detected (recon-all incomplete); removing and restarting.\n');
-                rmdir(fsSubjDir, 's');
+                if exist(isRunningFile, 'file') == 2
+                    fprintf('[Stage 3] Stale IsRunning lock detected; removing so recon-all can resume.\n');
+                    delete(isRunningFile);
+                end
+                fprintf('[Stage 3] Partial FreeSurfer output detected; resuming recon-all from last completed stage.\n');
             end
 
-            envelopeOnly = reconDone && ~forceNew;
-            create_surf(self.subj, mrNii, self.locDirs.fs, ...
-                'freesurfer_bin', self.fsBin, 'envelope_only', envelopeOnly);
+            if subjHasFiles && ~reconDone
+                % Resume: pass -no-isrunning flag so recon-all doesn't abort
+                % due to the (now deleted) lock file, and skips done steps.
+                setenv('SUBJECTS_DIR', self.locDirs.fs);
+                resumeCmd = sprintf('source %s && recon-all -sd %s -subjid %s -all -no-isrunning', ...
+                    fullfile(fileparts(self.fsBin), 'SetUpFreeSurfer.sh'), ...
+                    self.locDirs.fs, self.subj);
+                fprintf('[Stage 3] Running: %s\n', resumeCmd);
+                [st, txt] = unix(['bash -c ''' strrep(resumeCmd,'''','''''') '''']);
+                if st ~= 0
+                    fprintf('%s', txt);
+                    error('[Stage 3] recon-all resume failed.');
+                end
+                % After resume, run envelope step
+                create_surf(self.subj, mrNii, self.locDirs.fs, ...
+                    'freesurfer_bin', self.fsBin, 'envelope_only', true);
+            else
+                envelopeOnly = reconDone && ~forceNew;
+                create_surf(self.subj, mrNii, self.locDirs.fs, ...
+                    'freesurfer_bin', self.fsBin, 'envelope_only', envelopeOnly);
+            end
         end
 
         % -----------------------------------------------------------------
@@ -537,6 +558,12 @@ classdef electrodeLocalizer < handle
 
             fprintf('[Stage 4] Running SUMA to generate standard ld141 mesh...\n');
 
+            % Ensure FREESURFER_HOME is set — required by mri_convert and
+            % mris_convert called internally by @SUMA_Make_Spec_FS.
+            fsHome = fileparts(self.fsBin);
+            setenv('FREESURFER',      fsHome);
+            setenv('FREESURFER_HOME', fsHome);
+
             % @SUMA_Make_Spec_FS requires mri/orig.mgz and an mri/orig/
             % directory (even if empty). Subjects from public datasets often
             % omit these; T1.mgz is equivalent to orig.mgz.
@@ -556,7 +583,7 @@ classdef electrodeLocalizer < handle
             suma(self.subj, self.locDirs.fs, ...
                 'afni_bin',       self.afniBin, ...
                 'freesurfer_bin', self.fsBin, ...
-                'rerun',          forceNew);
+                'rerun',          ~done || forceNew);
 
             % @SUMA_Make_Spec_FS sometimes exits 0 even on failure.
             % Verify the expected output actually exists.
@@ -592,10 +619,11 @@ classdef electrodeLocalizer < handle
 
             fprintf('[Stage 5] Coregistering CT to MR via AFNI align.sh...\n');
 
-            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
-            ctNii = fullfile(self.locDirs.ct_1,   'ct_implant.nii');
+            ctNii = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
+            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s', ctNii);
+            mrNii      = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            mrWorkName = 'mr_pre.nii';
             assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
-            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s',  ctNii);
 
             alignScript = fullfile(fileparts(mfilename('fullpath')), ...
                 'Utilities', 'eeg_toolbox', 'localize', 'zLocalize', ...
@@ -612,7 +640,7 @@ classdef electrodeLocalizer < handle
             % space (causing a systematic ~20-35 mm electrode displacement).
             % Pre-reorienting to RAI with 3dresample makes 3dWarp a no-op,
             % keeping the coordinate frame consistent with the SUMA surfaces.
-            mrWork = fullfile(workDir, 'mr_pre.nii');
+            mrWork = fullfile(workDir, mrWorkName);
             ctWork = fullfile(workDir, 'ct_implant.nii');
             if exist(mrWork, 'file') ~= 2
                 fprintf('[Stage 5] Resampling MR to RAI orientation for AFNI registration...\n');
@@ -621,7 +649,7 @@ classdef electrodeLocalizer < handle
                 [cst, ctx] = unix(cmd);
                 if cst ~= 0
                     fprintf('%s\n', ctx);
-                    fprintf('[Stage 5] 3dresample failed; copying mr_pre.nii directly.\n');
+                    fprintf('[Stage 5] 3dresample failed; copying %s directly.\n', mrWorkName);
                     copyfile(mrNii, mrWork);
                 end
             end
@@ -638,7 +666,8 @@ classdef electrodeLocalizer < handle
                 % align.sh tools (3dWarp, 3dAutomask, @Align_Centers, etc.)
                 % don't accept -overwrite and will silently skip or error on
                 % existing files, causing align_epi_anat.py to run on stale data.
-                stale = [dir(fullfile(workDir, 'mr_pre_do*')); ...
+                mrStem = mrWorkName(1:end-4);  % strip .nii → 'mr_pre' or 'mr_post'
+                stale = [dir(fullfile(workDir, [mrStem '_do*'])); ...
                          dir(fullfile(workDir, 'ct_implant_shft*')); ...
                          dir(fullfile(workDir, 'ct_implant_sh2*')); ...
                          dir(fullfile(workDir, '__tt_*')); ...
@@ -652,8 +681,8 @@ classdef electrodeLocalizer < handle
                 % align_epi_anat.py writes *_mat.aff12.1D BEFORE calling 3dNotes,
                 % so we poll for that file instead of waiting for shell exit.
                 logFile = fullfile(workDir, 'align_log.txt');
-                unix(sprintf('bash "%s" mr_pre ct_implant "%s" > "%s" 2>&1 &', ...
-                    alignScript, workDir, logFile));
+                unix(sprintf('bash "%s" %s ct_implant "%s" > "%s" 2>&1 &', ...
+                    alignScript, mrStem, workDir, logFile));
 
                 fprintf('[Stage 5] Running align_epi_anat.py (polling every 15 s) .');
                 t0_align = tic; alignTimeout = 3600;
@@ -696,6 +725,7 @@ classdef electrodeLocalizer < handle
             save(xfmFile, 'aff1D');
             fprintf('[Stage 5] Transform path saved to %s\n', xfmFile);
         end
+
 
         % -----------------------------------------------------------------
         %% Stage 6 — electrode cluster detection via AFNI
@@ -742,6 +772,7 @@ classdef electrodeLocalizer < handle
                 aff1D = fullfile(self.locDirs.ct_1_xfm, hits(1).name);
                 fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
             end
+
 
             % CT BRIK created by align.sh (3dresample -orient RAI).
             % AFNI writes compressed BRIK.gz by default; check both forms.
@@ -1122,6 +1153,17 @@ classdef electrodeLocalizer < handle
             assert(exist(ctFile,'file')==2, ...
                 '[manualLocalize] Coregistered CT not found: %s\nRun coregisterCT first.', ctFile);
 
+            % Load CT→MR transform (produced by coregisterCT) for coord xfm.
+            xfmFilePath = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
+            assert(exist(xfmFilePath,'file')==2, ...
+                '[manualLocalize] CT-MR transform not found. Run coregisterCT first.');
+            S_xfm   = load(xfmFilePath, 'aff1D');
+            aff1D   = S_xfm.aff1D;
+            workDir = self.locDirs.ct_1_xfm;
+            ctBrik  = fullfile(workDir, 'ct_implant+orig');
+            assert(exist([ctBrik '.BRIK'],'file')==2 || exist([ctBrik '.BRIK.gz'],'file')==2, ...
+                '[manualLocalize] CT BRIK not found: %s.BRIK(.gz)\nRun coregisterCT first.', ctBrik);
+
             % ---- Load CT ----
             info = niftiinfo(ctFile);
             vol  = double(niftiread(info));          % [nx, ny, nz]
@@ -1148,24 +1190,32 @@ classdef electrodeLocalizer < handle
             markers = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
 
             % ---- Main loop: slicer → 3-D review → restart or proceed ----
+            markersFS = [];   % FreeSurfer RAS coords; set when user proceeds
             while true
-                markers = runSlicerGUI(markers);
+                markers = runSlicerGUI(markers, sortedChanNames);
                 if isempty(markers) && nargout == 0
                     error('electrodeLocalizer:cancelled', ...
                         '[manualLocalize] Cancelled — no markers placed.');
                 end
-                action = run3DReview(markers);
+                % Transform CT NIfTI RAS → scanner RAS, then snap subdural
+                % contacts to the pial-outer-smoothed surface before review.
+                markersFS = ctRasToFS(markers);
+                markersFS = snapToPia(markersFS);
+                action = run3DReview(markersFS);
                 if strcmp(action, 'proceed')
                     break;
+                elseif strcmp(action, 'quit')
+                    error('electrodeLocalizer:userQuit', ...
+                        '[manualLocalize] Aborted by user in 3-D review.');
                 end
-                % 'restart' → loop back to slicer with markers preserved
+                % 'restart' → loop back to slicer; markers stay in CT RAS
             end
 
-            % ---- Build self.leads ----
-            N = numel(markers);
-            chanNames_out = {markers.chanName}';
-            types_out     = {markers.type}';
-            xyz = [[markers.x]', [markers.y]', [markers.z]'];
+            % ---- Build self.leads (FreeSurfer RAS coords) ----
+            N = numel(markersFS);
+            chanNames_out = {markersFS.chanName}';
+            types_out     = {markersFS.type}';
+            xyz = [[markersFS.x]', [markersFS.y]', [markersFS.z]'];
             self.clusters = xyz;
             self.leads = table(chanNames_out, xyz(:,1), xyz(:,2), xyz(:,3), types_out, ...
                 'VariableNames', {'chanName','x','y','z','type'});
@@ -1176,20 +1226,155 @@ classdef electrodeLocalizer < handle
             fprintf('[manualLocalize] %d contacts saved.\n', N);
 
             % ==============================================================
+            % Nested: CT NIfTI RAS → FreeSurfer RAS transform
+            % ==============================================================
+            function mkrsFS = ctRasToFS(mkrs)
+                % Converts marker coords (stored as NIfTI world mm, RAS) to
+                % FreeSurfer/scanner RAS (same space as SUMA pial GIFTIs).
+                %
+                % Pipeline (bypasses xfm_leads/ConvertSurface entirely):
+                %   1. CT NIfTI RAS → CT NIfTI 0-idx voxel  (via inv(Txfm))
+                %   2. CT NIfTI voxel → CT BRIK voxel        (axis flips for RAI BRIK)
+                %   3. CT BRIK voxel → CT AFNI DICOM mm      (scale + origin)
+                %   4. CT AFNI DICOM → MR AFNI DICOM         (inv(aff12.1D))
+                %   5. MR AFNI DICOM → MR BRIK voxel         (reverse scale)
+                %   6. MR BRIK voxel → mr_pre.nii voxel      (all axes flipped: RAI→LPS)
+                %   7. mr_pre.nii voxel → NIfTI RAS          (mr_pre.nii affine)
+                if isempty(mkrs)
+                    mkrsFS = mkrs;
+                    return;
+                end
+                nReal = numel(mkrs);
+
+                % ---- Step 1: CT NIfTI RAS → 0-indexed NIfTI voxel ----
+                invT = inv(Txfm);
+                vox_0 = zeros(nReal, 3);
+                for mi = 1:nReal
+                    mm_h = [mkrs(mi).x, mkrs(mi).y, mkrs(mi).z, 1];
+                    vox_h = mm_h * invT;
+                    vox_0(mi,:) = round(vox_h(1:3)) - 1;
+                end
+
+                % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
+                % Flip each axis where NIfTI and BRIK directions are opposite.
+                % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
+                ct_bvox = vox_0;
+                if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
+                if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
+                if Txfm(3,3) > 0, ct_bvox(:,3) = (nz-1) - ct_bvox(:,3); end
+
+                % ---- Step 3: CT BRIK voxel → CT AFNI DICOM ----
+                [~, ct_hdr] = unix(sprintf('"%s/3dinfo" -di -dj -dk -o3 "%s+orig" 2>/dev/null', ...
+                    self.afniBin, fullfile(workDir,'ct_implant')));
+                ct_v = sscanf(ct_hdr, '%f');   % [di dj dk ox oy oz]
+                ct_vs  = ct_v(1:3)';
+                ct_org = ct_v(4:6)';
+                ct_dicom = ct_bvox .* ct_vs + ct_org;
+
+                % ---- Step 4: CT AFNI DICOM → MR AFNI DICOM via inv(aff12.1D) ----
+                fid    = fopen(aff1D, 'r');
+                M_vals = fscanf(fid, '%f', 12);
+                fclose(fid);
+                M_raw  = reshape(M_vals(:), 4, 3)';   % 3×4 (column-major fill → transpose)
+                M4     = [M_raw; 0 0 0 1];
+                invM4  = inv(M4);
+                ct_h     = [ct_dicom, ones(nReal,1)]';  % 4 × nReal
+                mr_dicom = (invM4 * ct_h)';             % nReal × 4
+                mr_dicom = mr_dicom(:,1:3);
+
+                mrBrikDir   = workDir;
+                mrNiiForXfm = fullfile(workDir, 'mr_pre.nii');
+
+                % ---- Step 5: MR AFNI DICOM → MR BRIK voxel ----
+                [~, mr_hdr] = unix(sprintf('"%s/3dinfo" -ni -nj -nk -di -dj -dk -o3 "%s" 2>/dev/null', ...
+                    self.afniBin, fullfile(mrBrikDir,'mr_pre_do+orig')));
+                mr_v       = sscanf(mr_hdr, '%f');   % [ni nj nk di dj dk ox oy oz]
+                mr_brik_dims = mr_v(1:3)';
+                mr_vs        = mr_v(4:6)';
+                mr_org       = mr_v(7:9)';
+                mr_bvox = round((mr_dicom - mr_org) ./ mr_vs);
+
+                % ---- Step 6: MR BRIK voxel → mr_pre.nii voxel ----
+                % RAI BRIK and mr_pre.nii (LPS) have all 3 axes reversed.
+                % Use mr_brik_dims (not mr_nii dims) because the de-obliqued
+                % BRIK has more z-slices (278) than the original NIfTI (250).
+                mr_nii_vox = (mr_brik_dims - 1) - mr_bvox;
+
+                % ---- Step 7: mr_pre.nii voxel → NIfTI RAS ----
+                mr_nii_info = niftiinfo(mrNiiForXfm);
+                mr_T = mr_nii_info.Transform.T;  % 4×4 MATLAB affine (1-based row-vec → world)
+                mr_vox_1 = mr_nii_vox + 1;       % 0-indexed → 1-indexed
+                mr_ras_h = [mr_vox_1, ones(nReal,1)] * mr_T;  % nReal × 4
+                xyzFS = mr_ras_h(:, 1:3);
+
+                mkrsFS = mkrs;
+                for mi = 1:nReal
+                    mkrsFS(mi).x = xyzFS(mi,1);
+                    mkrsFS(mi).y = xyzFS(mi,2);
+                    mkrsFS(mi).z = xyzFS(mi,3);
+                end
+            end
+
+            % ==============================================================
+            % Nested: snap subdural contacts to pial-outer-smoothed surface
+            % ==============================================================
+            function mkrsOut = snapToPia(mkrsIn)
+                mkrsOut = mkrsIn;
+                if isempty(mkrsIn), return; end
+
+                sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
+                lhFile  = fullfile(sumaDir, 'lh.pial-outer-smoothed.gii');
+                rhFile  = fullfile(sumaDir, 'rh.pial-outer-smoothed.gii');
+                if ~exist(lhFile,'file') || ~exist(rhFile,'file')
+                    return;   % surfaces not yet available — skip silently
+                end
+                lhVerts = gifti(lhFile).vertices;
+                rhVerts = gifti(rhFile).vertices;
+
+                for mi = 1:numel(mkrsIn)
+                    if ~strcmp(mkrsIn(mi).type, 'subdural'), continue; end
+                    if mkrsIn(mi).x < 0
+                        verts = lhVerts;
+                    else
+                        verts = rhVerts;
+                    end
+                    dists = sum((verts - [mkrsIn(mi).x, mkrsIn(mi).y, mkrsIn(mi).z]).^2, 2);
+                    [~, idx] = min(dists);
+                    mkrsOut(mi).x = verts(idx,1);
+                    mkrsOut(mi).y = verts(idx,2);
+                    mkrsOut(mi).z = verts(idx,3);
+                end
+            end
+
+            % ==============================================================
             % Nested: CT slicer GUI
             % ==============================================================
-            function markersOut = runSlicerGUI(markersIn)
+            function markersOut = runSlicerGUI(markersIn, sortedChanNames)
 
                 % ---- State ----
                 curVox = [round(nx/2), round(ny/2), round(nz/2)];
                 wW = 3000;  wL = 700;
-                mode = 'normal';   % 'normal' | 'pan' | 'zoom'
-                dragStart   = [];  % for pan
-                dragLimX    = [];
-                dragLimY    = [];
-                dragAxes    = [];
-                markersOut  = markersIn;
-                pendingPos  = [];   % voxel [ix,iy,iz] awaiting name entry
+                mode = 'scroll';   % 'scroll' | 'zoom'
+                dragStart    = [];  % axes data coords at drag start
+                dragStartFig = [];  % figure pixel coords at drag start
+                dragLimX     = [];
+                dragLimY     = [];
+                dragAxes     = [];
+                isDragging   = false;
+                pixdim       = info.PixelDimensions;   % [dx dy dz] mm/vox
+                markersOut   = markersIn;
+                pendingPos   = [];   % voxel [ix,iy,iz] awaiting name entry
+
+                % ---- Orientation flip flags (computed once, shared by all callbacks) ----
+                % These determine whether the displayed image is flipud relative to
+                % voxel index order.  Any callback that maps display coords ↔ voxels
+                % must apply the same transforms used in refreshAll.
+                colX_ = Txfm(1:3,1);  colY_ = Txfm(1:3,2);  colZ_ = Txfm(1:3,3);
+                ax_xFlip  = colX_(1) > 0;   % XDir='reverse' for axial/coronal
+                ax_yFlip  = colY_(2) < 0;   % flipud on axial y (dim2)
+                cor_xFlip = colX_(1) > 0;
+                cor_yTop  = colZ_(3) < 0;   % flipud on coronal/sagittal y (dim3)
+                sag_xFlip = colY_(2) < 0;   % XDir='reverse' for sagittal x
 
                 % ---- Color scheme ----
                 bg  = [0.12 0.12 0.12];
@@ -1210,45 +1395,55 @@ classdef electrodeLocalizer < handle
                     'CloseRequestFcn',@cbClose);
 
                 % ---- Toolbar strip (top, left 75%) ----
-                tbY = 0.935;  tbH = 0.055;
+                tbH  = 0.048;
+                tb1Y = 0.950;           % top row: mode buttons + hint
+                tb2Y = tb1Y - tbH - 0.006;  % bottom row: W/L controls + Reset View
+
+                % --- Row 1: mode + hint ---
                 uicontrol(fig,'Style','text','String','Mode:', ...
-                    'Units','normalized','Position',[0.01 tbY 0.04 tbH], ...
+                    'Units','normalized','Position',[0.01 tb1Y 0.04 tbH], ...
                     'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
-                btnNormal = uicontrol(fig,'Style','togglebutton','String','Normal', ...
-                    'Units','normalized','Position',[0.05 tbY 0.07 tbH], ...
+                btnNormal = uicontrol(fig,'Style','togglebutton','String','Scroll', ...
+                    'Units','normalized','Position',[0.05 tb1Y 0.07 tbH], ...
                     'BackgroundColor',[0.25 0.55 0.25],'ForegroundColor','w', ...
-                    'FontSize',10,'Value',1,'Callback',@(~,~) setMode('normal'));
-                btnPan = uicontrol(fig,'Style','togglebutton','String','Pan', ...
-                    'Units','normalized','Position',[0.13 tbY 0.06 tbH], ...
-                    'BackgroundColor',bg2,'ForegroundColor',fg, ...
-                    'FontSize',10,'Value',0,'Callback',@(~,~) setMode('pan'));
+                    'FontSize',10,'Value',1,'Callback',@(~,~) setMode('scroll'));
                 btnZoom = uicontrol(fig,'Style','togglebutton','String','Zoom', ...
-                    'Units','normalized','Position',[0.20 tbY 0.06 tbH], ...
+                    'Units','normalized','Position',[0.13 tb1Y 0.06 tbH], ...
                     'BackgroundColor',bg2,'ForegroundColor',fg, ...
                     'FontSize',10,'Value',0,'Callback',@(~,~) setMode('zoom'));
+                uicontrol(fig,'Style','text', ...
+                    'String','Drag to pan  |  Click to place crosshair  |  Scroll: slice (scroll mode) / zoom (zoom mode)', ...
+                    'Units','normalized','Position',[0.20 tb1Y 0.56 tbH], ...
+                    'BackgroundColor',bg,'ForegroundColor',[0.5 0.5 0.5],'FontSize',9, ...
+                    'HorizontalAlignment','left');
 
+                % --- Row 2: W/L + Reset View ---
                 uicontrol(fig,'Style','text','String','W:', ...
-                    'Units','normalized','Position',[0.30 tbY 0.025 tbH], ...
+                    'Units','normalized','Position',[0.01 tb2Y 0.025 tbH], ...
                     'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
                 hW = uicontrol(fig,'Style','edit','String',num2str(wW), ...
-                    'Units','normalized','Position',[0.325 tbY 0.055 tbH], ...
+                    'Units','normalized','Position',[0.038 tb2Y 0.060 tbH], ...
                     'BackgroundColor',bg3,'ForegroundColor',fg, ...
                     'FontSize',10,'Callback',@cbWL);
                 uicontrol(fig,'Style','text','String','L:', ...
-                    'Units','normalized','Position',[0.385 tbY 0.025 tbH], ...
+                    'Units','normalized','Position',[0.103 tb2Y 0.025 tbH], ...
                     'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
                 hL = uicontrol(fig,'Style','edit','String',num2str(wL), ...
-                    'Units','normalized','Position',[0.41 tbY 0.055 tbH], ...
+                    'Units','normalized','Position',[0.131 tb2Y 0.060 tbH], ...
                     'BackgroundColor',bg3,'ForegroundColor',fg, ...
                     'FontSize',10,'Callback',@cbWL);
-
                 uicontrol(fig,'Style','pushbutton','String','Reset View', ...
-                    'Units','normalized','Position',[0.50 tbY 0.07 tbH], ...
+                    'Units','normalized','Position',[0.20 tb2Y 0.08 tbH], ...
                     'BackgroundColor',bg2,'ForegroundColor',fg, ...
                     'FontSize',10,'Callback',@cbResetView);
 
                 % ---- Slice panels ----
-                panW = 0.235;  panH = 0.875;  panY = 0.045;
+                % Make panels square in pixels so DataAspectRatio fills them
+                % without black bars for isotropic CT data.
+                figPos = get(fig,'Position');   % [left bottom width height] px
+                panW = 0.235;
+                panH = panW * figPos(3) / figPos(4);  % same pixel size → square
+                panY = (tb2Y - panH) / 2 + 0.005;    % centered between bottom edge and row-2 toolbar
                 axAx  = axes('Parent',fig,'Position',[0.005 panY panW panH], ...
                     'Color','k','XColor','none','YColor','none'); hold(axAx,'on');
                 axCor = axes('Parent',fig,'Position',[0.248 panY panW panH], ...
@@ -1323,10 +1518,14 @@ classdef electrodeLocalizer < handle
                     'Units','normalized','Position',[rx 0.13 rw 0.056], ...
                     'BackgroundColor',[0.48 0.18 0.18],'ForegroundColor','w', ...
                     'FontSize',10,'Callback',@cbRemove);
+                uicontrol(fig,'Style','pushbutton','String','Quit', ...
+                    'Units','normalized','Position',[rx 0.02 rw*0.44 0.09], ...
+                    'BackgroundColor',[0.35 0.15 0.15],'ForegroundColor','w', ...
+                    'FontSize',11,'Callback',@cbQuit);
                 uicontrol(fig,'Style','pushbutton','String','Done', ...
-                    'Units','normalized','Position',[rx 0.02 rw 0.09], ...
+                    'Units','normalized','Position',[rx+rw*0.56 0.02 rw*0.44 0.09], ...
                     'BackgroundColor',[0.20 0.38 0.58],'ForegroundColor','w', ...
-                    'FontSize',13,'FontWeight','bold','Callback',@cbDone);
+                    'FontSize',11,'FontWeight','bold','Callback',@cbDone);
 
                 refreshAll();
                 waitfor(fig);
@@ -1334,16 +1533,44 @@ classdef electrodeLocalizer < handle
                 % ---- Helpers ----
                 function setMode(m)
                     mode = m;
-                    set(btnNormal,'Value', strcmp(m,'normal'), ...
-                        'BackgroundColor', ternary(strcmp(m,'normal'),[0.25 0.55 0.25],bg2));
-                    set(btnPan,   'Value', strcmp(m,'pan'), ...
-                        'BackgroundColor', ternary(strcmp(m,'pan'),  [0.50 0.40 0.10],bg2));
+                    set(btnNormal,'Value', strcmp(m,'scroll'), ...
+                        'BackgroundColor', ternary(strcmp(m,'scroll'),[0.25 0.55 0.25],bg2));
                     set(btnZoom,  'Value', strcmp(m,'zoom'), ...
                         'BackgroundColor', ternary(strcmp(m,'zoom'), [0.10 0.35 0.55],bg2));
                 end
 
                 function v = ternary(cond, a, b)
                     if cond, v = a; else, v = b; end
+                end
+
+                function addOrientLabels(ax, leftLbl, rightLbl, topLbl, botLbl)
+                    % Place orientation labels at the visual edges of ax.
+                    % Uses DATA units to avoid any ambiguity with reversed axes:
+                    % XDir='reverse' means xl(2) is the visual-left edge.
+                    prevLbls = findobj(ax,'Tag','orientLabel');
+                    if ~isempty(prevLbls), delete(prevLbls); end
+                    xl = get(ax,'XLim');  yl = get(ax,'YLim');
+                    xrev = strcmp(get(ax,'XDir'),'reverse');
+                    yrev = strcmp(get(ax,'YDir'),'reverse');
+                    % Visual-edge data coordinates.
+                    xL = xl(1 + xrev);   % xl(2) if reversed (high x = visual left)
+                    xR = xl(2 - xrev);   % xl(1) if reversed (low  x = visual right)
+                    yT = yl(2 - yrev);   % yl(2) if normal   (high y = visual top)
+                    yB = yl(1 + yrev);   % yl(1) if normal   (low  y = visual bot)
+                    % Small inset (move away from the edge, toward center).
+                    dx = 0.03*(xl(2)-xl(1)) * (1 - 2*xrev);  % +dx inward if normal, -dx if rev
+                    dy = 0.03*(yl(2)-yl(1)) * (1 - 2*yrev);
+                    txtArgs = {'Units','data','FontSize',10,'FontWeight','bold', ...
+                               'Color',[1 1 0],'HitTest','off','Tag','orientLabel', ...
+                               'Clipping','off'};
+                    text(ax, xL+dx, mean(yl), leftLbl,  txtArgs{:}, ...
+                        'HorizontalAlignment','left',  'VerticalAlignment','middle');
+                    text(ax, xR-dx, mean(yl), rightLbl, txtArgs{:}, ...
+                        'HorizontalAlignment','right', 'VerticalAlignment','middle');
+                    text(ax, mean(xl), yT-dy, topLbl,   txtArgs{:}, ...
+                        'HorizontalAlignment','center','VerticalAlignment','top');
+                    text(ax, mean(xl), yB+dy, botLbl,   txtArgs{:}, ...
+                        'HorizontalAlignment','center','VerticalAlignment','bottom');
                 end
 
                 function ax = hitAxes(pt)
@@ -1373,41 +1600,52 @@ classdef electrodeLocalizer < handle
                     clim_lo = wL - wW/2;
                     clim_hi = wL + wW/2;
 
-                    % Axial: show vol(:,:,iz) transposed → x horizontal, y vertical
+                    % Flip flags are computed once in the outer scope (ax_xFlip, etc.)
+
+                    % ---- Axial ----
                     sl_ax = vol(:,:,curVox(3))';
+                    if ax_yFlip, sl_ax = flipud(sl_ax); end
                     if isempty(hImAx) || ~ishandle(hImAx)
                         hImAx = imagesc(axAx, sl_ax, [clim_lo clim_hi]);
                         colormap(axAx, gray);
-                        axis(axAx,'image','xy');
-                        set(hImAx,'ButtonDownFcn',@cbClickAx);
+                        axis(axAx,'normal');
+                        set(axAx,'XLim',[0.5 nx+0.5],'YLim',[0.5 ny+0.5],'YDir','normal');
+                        if ax_xFlip, set(axAx,'XDir','reverse'); end
+                        addOrientLabels(axAx, 'R','L','A','P');
                     else
-                        set(hImAx,'CData',sl_ax,'CLim',[clim_lo clim_hi]);
+                        set(hImAx,'CData',sl_ax);
                         clim(axAx,[clim_lo clim_hi]);
                     end
                     set(hTitleAx,'String',sprintf('AXIAL   z=%d/%d',curVox(3),nz));
 
-                    % Coronal: vol(:,iy,:) transposed → x horizontal, z vertical (flip for S-up)
-                    sl_cor = flipud(squeeze(vol(:,curVox(2),:))');
+                    % ---- Coronal ----
+                    sl_cor = squeeze(vol(:,curVox(2),:))';
+                    if cor_yTop, sl_cor = flipud(sl_cor); end
                     if isempty(hImCor) || ~ishandle(hImCor)
                         hImCor = imagesc(axCor, sl_cor, [clim_lo clim_hi]);
                         colormap(axCor, gray);
-                        axis(axCor,'image','xy');
-                        set(hImCor,'ButtonDownFcn',@cbClickCor);
+                        axis(axCor,'normal');
+                        set(axCor,'XLim',[0.5 nx+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                        if cor_xFlip, set(axCor,'XDir','reverse'); end
+                        addOrientLabels(axCor, 'R','L','S','I');
                     else
-                        set(hImCor,'CData',sl_cor,'CLim',[clim_lo clim_hi]);
+                        set(hImCor,'CData',sl_cor);
                         clim(axCor,[clim_lo clim_hi]);
                     end
                     set(hTitleCor,'String',sprintf('CORONAL   y=%d/%d',curVox(2),ny));
 
-                    % Sagittal: vol(ix,:,:) transposed → y horizontal, z vertical (flip for S-up)
-                    sl_sag = flipud(squeeze(vol(curVox(1),:,:))');
+                    % ---- Sagittal ----
+                    sl_sag = squeeze(vol(curVox(1),:,:))';
+                    if cor_yTop, sl_sag = flipud(sl_sag); end   % same z-flip as coronal
                     if isempty(hImSag) || ~ishandle(hImSag)
                         hImSag = imagesc(axSag, sl_sag, [clim_lo clim_hi]);
                         colormap(axSag, gray);
-                        axis(axSag,'image','xy');
-                        set(hImSag,'ButtonDownFcn',@cbClickSag);
+                        axis(axSag,'normal');
+                        set(axSag,'XLim',[0.5 ny+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                        if sag_xFlip, set(axSag,'XDir','reverse'); end
+                        addOrientLabels(axSag, 'P','A','S','I');
                     else
-                        set(hImSag,'CData',sl_sag,'CLim',[clim_lo clim_hi]);
+                        set(hImSag,'CData',sl_sag);
                         clim(axSag,[clim_lo clim_hi]);
                     end
                     set(hTitleSag,'String',sprintf('SAGITTAL   x=%d/%d',curVox(1),nx));
@@ -1419,21 +1657,33 @@ classdef electrodeLocalizer < handle
                     set(hStatus,'String', ...
                         sprintf('  vox [%d, %d, %d]    x=%.1f  y=%.1f  z=%.1f mm', ...
                         curVox(1),curVox(2),curVox(3), mm(1),mm(2),mm(3)));
+
+                    % Refresh available channel names list
+                    if ~isempty(sortedChanNames)
+                        used = {markersOut.chanName};
+                        rem  = sortedChanNames(~ismember(sortedChanNames, used));
+                        set(hList,'String',rem(:), ...
+                            'Value',max(1,min(get(hList,'Value'),numel(rem))));
+                    end
                 end
 
                 function refreshCrosshairs()
                     if ~ishandle(fig), return; end
-                    % Axial crosshair: vertical at ix, horizontal at iy
+                    % Axial crosshair: vertical at ix, horizontal at iy.
+                    % When ax_yFlip=true, the image was flipud before display,
+                    % so voxel iy appears at display row (ny - iy + 1).
+                    iy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
                     if ~isempty(hXHax) && all(ishandle(hXHax))
                         delete(hXHax);
                     end
                     hXHax(1) = plot(axAx, [curVox(1) curVox(1)], [0.5 ny+0.5], ...
                         'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-                    hXHax(2) = plot(axAx, [0.5 nx+0.5], [curVox(2) curVox(2)], ...
+                    hXHax(2) = plot(axAx, [0.5 nx+0.5], [iy_disp iy_disp], ...
                         'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
 
                     % Coronal crosshair: vertical at ix, horizontal at (flipped) iz
-                    iz_cor = nz - curVox(3) + 1;
+                    % When cor_yTop=true the image was flipud, so voxel iz maps to display row (nz - iz + 1).
+                    iz_cor = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
                     if ~isempty(hXHcor) && all(ishandle(hXHcor))
                         delete(hXHcor);
                     end
@@ -1461,86 +1711,77 @@ classdef electrodeLocalizer < handle
 
                     if isempty(markersOut), return; end
 
-                    % Convert marker world mm back to voxel for display
+                    % Convert marker world mm back to voxel for display.
+                    % vox2mm: vox_h * Txfm = mm_h  →  inverse: mm_h * inv(Txfm) = vox_h
                     invT = inv(Txfm);
                     for mi = 1:numel(markersOut)
                         mm_h = [markersOut(mi).x, markersOut(mi).y, markersOut(mi).z, 1];
-                        vx   = round(mm_h * invT');
+                        vx   = round(mm_h * invT);   % no transpose — row-vector convention
                         vx   = vx(1:3);
 
-                        col = ternary(strcmp(markersOut(mi).type,'depth'), ...
-                            [0.3 0.6 1.0], [0.3 1.0 0.5]);
+                        mkCol  = [0.15 0.35 0.85];   % dark blue dot
+                        txtCol = [0.55 0.75 1.00];   % lighter blue text (readable on dark CT)
 
-                        % Axial: plot at (vx(1), vx(2))
-                        hMkAx(end+1) = scatter(axAx, vx(1), vx(2), 60, col, ...
-                            'filled','HitTest','off'); %#ok<AGROW>
-                        hMkAx(end+1) = text(axAx, vx(1)+2, vx(2), ...
-                            markersOut(mi).chanName,'Color',col,'FontSize',7, ...
-                            'HitTest','off'); %#ok<AGROW>
+                        % Axial: only show if this marker is on the current axial slice (z).
+                        if abs(vx(3) - curVox(3)) <= 1
+                            vy_disp = ternary(ax_yFlip, ny - vx(2) + 1, vx(2));
+                            hMkAx(end+1) = scatter(axAx, vx(1), vy_disp, 80, mkCol, ...
+                                'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
+                            hMkAx(end+1) = text(axAx, vx(1)+2, vy_disp, ...
+                                markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                                'FontWeight','bold','HitTest','off'); %#ok<AGROW>
+                        end
 
-                        % Coronal: plot at (vx(1), flipped vx(3))
-                        iz_c = nz - vx(3) + 1;
-                        hMkCor(end+1) = scatter(axCor, vx(1), iz_c, 60, col, ...
-                            'filled','HitTest','off'); %#ok<AGROW>
-                        hMkCor(end+1) = text(axCor, vx(1)+2, iz_c, ...
-                            markersOut(mi).chanName,'Color',col,'FontSize',7, ...
-                            'HitTest','off'); %#ok<AGROW>
+                        % Coronal: only show if on the current coronal slice (y).
+                        iz_c = ternary(cor_yTop, nz - vx(3) + 1, vx(3));
+                        if abs(vx(2) - curVox(2)) <= 1
+                            hMkCor(end+1) = scatter(axCor, vx(1), iz_c, 80, mkCol, ...
+                                'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
+                            hMkCor(end+1) = text(axCor, vx(1)+2, iz_c, ...
+                                markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                                'FontWeight','bold','HitTest','off'); %#ok<AGROW>
+                        end
 
-                        % Sagittal: plot at (vx(2), flipped vx(3))
-                        hMkSag(end+1) = scatter(axSag, vx(2), iz_c, 60, col, ...
-                            'filled','HitTest','off'); %#ok<AGROW>
-                        hMkSag(end+1) = text(axSag, vx(2)+2, iz_c, ...
-                            markersOut(mi).chanName,'Color',col,'FontSize',7, ...
-                            'HitTest','off'); %#ok<AGROW>
+                        % Sagittal: only show if on the current sagittal slice (x).
+                        if abs(vx(1) - curVox(1)) <= 1
+                            hMkSag(end+1) = scatter(axSag, vx(2), iz_c, 80, mkCol, ...
+                                'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
+                            hMkSag(end+1) = text(axSag, vx(2)+2, iz_c, ...
+                                markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                                'FontWeight','bold','HitTest','off'); %#ok<AGROW>
+                        end
                     end
 
                     % Update marker list on right panel
                     strs = arrayfun(@(m) sprintf('%s  [%s]', m.chanName, m.type), ...
                         markersOut, 'UniformOutput', false);
                     set(hMkList,'String',strs,'Value',min(get(hMkList,'Value'),numel(strs)));
-
-                    % Refresh available channel names
-                    used = {markersOut.chanName};
-                    if ~isempty(sortedChanNames)
-                        rem = sortedChanNames(~ismember(sortedChanNames, used));
-                        set(hList,'String',rem(:), ...
-                            'Value',max(1,min(get(hList,'Value'),numel(rem))));
-                    end
                 end
 
                 function setPendingPos(vox)
                     pendingPos = vox;
                     curVox = vox;
                     set(hPlaceBtn,'Enable','on');
+                    recenterAllOnCurVox();
                     refreshAll();
                 end
 
-                % ---- Click callbacks for each panel ----
-                function cbClickAx(~,~)
-                    if ~strcmp(mode,'normal'), return; end
-                    [dp, valid] = axesDataPoint(axAx);
-                    if ~valid, return; end
-                    ix = max(1,min(nx, round(dp(1))));
-                    iy = max(1,min(ny, round(dp(2))));
-                    setPendingPos([ix, iy, curVox(3)]);
+                function recenterAllOnCurVox()
+                    % Pan each panel to keep curVox centered, preserving zoom level.
+                    vy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
+                    iz_disp = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
+                    centerAxis(axAx,  curVox(1), vy_disp);
+                    centerAxis(axCor, curVox(1), iz_disp);
+                    centerAxis(axSag, curVox(2), iz_disp);
+                    addOrientLabels(axAx,  'R','L','A','P');
+                    addOrientLabels(axCor, 'R','L','S','I');
+                    addOrientLabels(axSag, 'P','A','S','I');
                 end
-                function cbClickCor(~,~)
-                    if ~strcmp(mode,'normal'), return; end
-                    [dp, valid] = axesDataPoint(axCor);
-                    if ~valid, return; end
-                    ix   = max(1,min(nx, round(dp(1))));
-                    iz_f = max(1,min(nz, round(dp(2))));
-                    iz   = nz - iz_f + 1;
-                    setPendingPos([ix, curVox(2), iz]);
-                end
-                function cbClickSag(~,~)
-                    if ~strcmp(mode,'normal'), return; end
-                    [dp, valid] = axesDataPoint(axSag);
-                    if ~valid, return; end
-                    iy   = max(1,min(ny, round(dp(1))));
-                    iz_f = max(1,min(nz, round(dp(2))));
-                    iz   = nz - iz_f + 1;
-                    setPendingPos([curVox(1), iy, iz]);
+
+                function centerAxis(ax, cx, cy)
+                    xl = get(ax,'XLim');  yl = get(ax,'YLim');
+                    hw = (xl(2)-xl(1))/2;  hh = (yl(2)-yl(1))/2;
+                    set(ax,'XLim',[cx-hw, cx+hw], 'YLim',[cy-hh, cy+hh]);
                 end
 
                 % ---- Window-level callbacks ----
@@ -1559,7 +1800,31 @@ classdef electrodeLocalizer < handle
                     if isempty(ax)
                         return
                     elseif strcmp(mode,'zoom') && ~isempty(ax)
-                        zoomAxes(ax, 1 + 0.15*delta);
+                        factor = 1 + 0.15*delta;
+                        % Use cursor position as center for the hovered panel;
+                        % use curVox as center for the other two panels.
+                        cp = get(ax,'CurrentPoint');
+                        ax_cx = cp(1,1);  ax_cy = cp(1,2);
+                        vy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
+                        iz_disp = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
+                        % Axial center: (vox_x, display_y)
+                        if isequal(ax, axAx)
+                            zoomAxes(axAx, factor, ax_cx, ax_cy);
+                        else
+                            zoomAxes(axAx, factor, curVox(1), vy_disp);
+                        end
+                        % Coronal center: (vox_x, display_z)
+                        if isequal(ax, axCor)
+                            zoomAxes(axCor, factor, ax_cx, ax_cy);
+                        else
+                            zoomAxes(axCor, factor, curVox(1), iz_disp);
+                        end
+                        % Sagittal center: (vox_y, display_z)
+                        if isequal(ax, axSag)
+                            zoomAxes(axSag, factor, ax_cx, ax_cy);
+                        else
+                            zoomAxes(axSag, factor, curVox(2), iz_disp);
+                        end
                         return;
                     end
                     if isequal(ax, axAx)
@@ -1572,41 +1837,96 @@ classdef electrodeLocalizer < handle
                     refreshAll();
                 end
 
-                function zoomAxes(ax, factor)
-                    cp  = get(ax,'CurrentPoint');
-                    cx  = cp(1,1);  cy = cp(1,2);
+                function zoomAxes(ax, factor, cx, cy)
                     xl  = get(ax,'XLim');  yl = get(ax,'YLim');
                     nxl = cx + (xl - cx) / factor;
                     nyl = cy + (yl - cy) / factor;
                     set(ax,'XLim',nxl,'YLim',nyl);
+                    % Reposition orientation labels to current view edges
+                    if isequal(ax, axAx)
+                        addOrientLabels(axAx,  'R','L','A','P');
+                    elseif isequal(ax, axCor)
+                        addOrientLabels(axCor, 'R','L','S','I');
+                    elseif isequal(ax, axSag)
+                        addOrientLabels(axSag, 'P','A','S','I');
+                    end
                 end
 
-                % ---- Pan / drag ----
+                % ---- Drag to pan / click to crosshair ----
                 function cbDown(~,~)
-                    if ~strcmp(mode,'pan'), return; end
                     ax = hitAxes(get(fig,'CurrentPoint'));
                     if isempty(ax), return; end
-                    dragAxes  = ax;
-                    cp = get(ax,'CurrentPoint');
-                    dragStart = cp(1,1:2);
-                    dragLimX  = get(ax,'XLim');
-                    dragLimY  = get(ax,'YLim');
+                    dragAxes     = ax;
+                    cp           = get(ax,'CurrentPoint');
+                    dragStart    = cp(1,1:2);
+                    dragLimX     = get(ax,'XLim');
+                    dragLimY     = get(ax,'YLim');
+                    dragStartFig = get(fig,'CurrentPoint');
+                    isDragging   = false;
                 end
                 function cbMotion(~,~)
-                    if ~strcmp(mode,'pan') || isempty(dragStart), return; end
-                    cp    = get(dragAxes,'CurrentPoint');
-                    delta = cp(1,1:2) - dragStart;
-                    set(dragAxes,'XLim', dragLimX - delta(1), 'YLim', dragLimY - delta(2));
+                    if isempty(dragStart) || isempty(dragAxes), return; end
+                    figPt = get(fig,'CurrentPoint');
+                    if norm(figPt - dragStartFig) > 4
+                        isDragging = true;
+                        cp    = get(dragAxes,'CurrentPoint');
+                        delta = cp(1,1:2) - dragStart;
+                        set(dragAxes,'XLim', dragLimX - delta(1), ...
+                                     'YLim', dragLimY - delta(2));
+                        % Reposition orientation labels to current view edges
+                        if isequal(dragAxes, axAx)
+                            addOrientLabels(axAx,  'R','L','A','P');
+                        elseif isequal(dragAxes, axCor)
+                            addOrientLabels(axCor, 'R','L','S','I');
+                        elseif isequal(dragAxes, axSag)
+                            addOrientLabels(axSag, 'P','A','S','I');
+                        end
+                    end
                 end
                 function cbUp(~,~)
+                    if ~isDragging && ~isempty(dragAxes)
+                        [dp, valid] = axesDataPoint(dragAxes);
+                        if valid
+                            if isequal(dragAxes, axAx)
+                                ix = max(1,min(nx, round(dp(1))));
+                                % dp(2) is the display row (after flipud if ax_yFlip).
+                                % Invert to get original voxel index.
+                                iy_d = max(1,min(ny, round(dp(2))));
+                                iy   = ternary(ax_yFlip, ny - iy_d + 1, iy_d);
+                                setPendingPos([ix, iy, curVox(3)]);
+                            elseif isequal(dragAxes, axCor)
+                                ix   = max(1,min(nx, round(dp(1))));
+                                iz_f = max(1,min(nz, round(dp(2))));
+                                % iz_f is display row; invert only if flipud was applied
+                                iz   = ternary(cor_yTop, nz - iz_f + 1, iz_f);
+                                setPendingPos([ix, curVox(2), iz]);
+                            elseif isequal(dragAxes, axSag)
+                                iy   = max(1,min(ny, round(dp(1))));
+                                iz_f = max(1,min(nz, round(dp(2))));
+                                iz   = ternary(cor_yTop, nz - iz_f + 1, iz_f);
+                                setPendingPos([curVox(1), iy, iz]);
+                            end
+                        end
+                    end
                     dragStart = []; dragAxes = []; dragLimX = []; dragLimY = [];
+                    dragStartFig = []; isDragging = false;
                 end
 
                 % ---- Reset view ----
                 function cbResetView(~,~)
-                    axis(axAx,  'image','xy');
-                    axis(axCor, 'image','xy');
-                    axis(axSag, 'image','xy');
+                    % Flip flags are in outer scope (ax_xFlip, cor_xFlip, sag_xFlip, cor_yTop)
+                    axis(axAx,'normal');
+                    set(axAx,'XLim',[0.5 nx+0.5],'YLim',[0.5 ny+0.5],'YDir','normal');
+                    if ax_xFlip,  set(axAx,'XDir','reverse');  else, set(axAx,'XDir','normal');  end
+                    axis(axCor,'normal');
+                    set(axCor,'XLim',[0.5 nx+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                    if cor_xFlip, set(axCor,'XDir','reverse'); else, set(axCor,'XDir','normal'); end
+                    axis(axSag,'normal');
+                    set(axSag,'XLim',[0.5 ny+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                    if sag_xFlip, set(axSag,'XDir','reverse'); else, set(axSag,'XDir','normal'); end
+                    addOrientLabels(axAx,  'R','L','A','P');
+                    addOrientLabels(axCor, 'R','L','S','I');
+                    addOrientLabels(axSag, 'P','A','S','I');
                 end
 
                 % ---- Keyboard shortcuts ----
@@ -1657,7 +1977,7 @@ classdef electrodeLocalizer < handle
                     set(hEdit,'String','');
                     pendingPos = [];
                     set(hPlaceBtn,'Enable','off');
-                    refreshMarkers();
+                    refreshAll();
                 end
 
                 % ---- Remove marker ----
@@ -1677,6 +1997,13 @@ classdef electrodeLocalizer < handle
                             'No Markers','Exit','Cancel','Cancel');
                         if ~strcmp(choice,'Exit'), return; end
                     end
+                    delete(fig);
+                end
+                function cbQuit(~,~)
+                    choice = questdlg('Quit localization? All placed markers will be discarded.', ...
+                        'Quit','Quit','Cancel','Cancel');
+                    if ~strcmp(choice,'Quit'), return; end
+                    markersOut = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
                     delete(fig);
                 end
                 function cbClose(~,~)
@@ -1706,7 +2033,7 @@ classdef electrodeLocalizer < handle
                 fig3 = figure('Name', sprintf('3-D Review — %s', self.subj), ...
                     'NumberTitle','off','Color',bg, ...
                     'Position',[100 80 1200 820], ...
-                    'CloseRequestFcn',@(~,~) delete(fig3));
+                    'CloseRequestFcn',@cbQuit);
 
                 ax3 = axes('Parent',fig3,'Position',[0.01 0.01 0.73 0.97], ...
                     'Color','k','XColor','none','YColor','none','ZColor','none');
@@ -1726,13 +2053,15 @@ classdef electrodeLocalizer < handle
                         'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
                 end
 
+                mkCol  = [0.15 0.35 0.85];
+                txtCol = [0.55 0.75 1.00];
                 for mi = 1:numel(mkrs)
-                    col = ternary3(strcmp(mkrs(mi).type,'depth'), ...
-                        [0.3 0.6 1.0], [0.3 1.0 0.5]);
                     scatter3(ax3, mkrs(mi).x, mkrs(mi).y, mkrs(mi).z, ...
-                        80, col, 'filled','HitTest','off');
+                        80, mkCol, 'filled','HitTest','off', ...
+                        'MarkerEdgeColor','w','LineWidth',0.5);
                     text(ax3, mkrs(mi).x+1, mkrs(mi).y, mkrs(mi).z, ...
-                        mkrs(mi).chanName,'Color',col,'FontSize',8,'HitTest','off');
+                        mkrs(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                        'FontWeight','bold','HitTest','off');
                 end
                 rotate3d(ax3,'on');
 
@@ -1747,10 +2076,10 @@ classdef electrodeLocalizer < handle
                     'BackgroundColor',bg,'ForegroundColor',[0 0.9 0.9], ...
                     'FontSize',13,'FontWeight','bold','HorizontalAlignment','center');
                 uicontrol(fig3,'Style','text', ...
-                    'String',sprintf('%d contacts placed.\n\nDrag to rotate.\nVerify positions\nthen Proceed.', numel(mkrs)), ...
+                    'String',sprintf('%d contacts placed.\n\nDrag to rotate.\nVerify positions.\nThen Proceed.', numel(mkrs)), ...
                     'Units','normalized','Position',[rx 0.65 rw 0.22], ...
                     'BackgroundColor',bg,'ForegroundColor',fg, ...
-                    'FontSize',11,'HorizontalAlignment','center');
+                    'FontSize',11,'HorizontalAlignment','left');
                 uicontrol(fig3,'Style','pushbutton','String','Proceed', ...
                     'Units','normalized','Position',[rx 0.45 rw 0.10], ...
                     'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
@@ -1759,6 +2088,10 @@ classdef electrodeLocalizer < handle
                     'Units','normalized','Position',[rx 0.32 rw 0.10], ...
                     'BackgroundColor',[0.40 0.20 0.10],'ForegroundColor','w', ...
                     'FontSize',12,'Callback',@cbRestart);
+                uicontrol(fig3,'Style','pushbutton','String','Quit', ...
+                    'Units','normalized','Position',[rx 0.19 rw 0.10], ...
+                    'BackgroundColor',[0.55 0.05 0.05],'ForegroundColor','w', ...
+                    'FontSize',12,'FontWeight','bold','Callback',@cbQuit);
 
                 waitfor(fig3);
 
@@ -1768,6 +2101,10 @@ classdef electrodeLocalizer < handle
                 end
                 function cbRestart(~,~)
                     action = 'restart';
+                    delete(fig3);
+                end
+                function cbQuit(~,~)
+                    action = 'quit';
                     delete(fig3);
                 end
             end  % run3DReview

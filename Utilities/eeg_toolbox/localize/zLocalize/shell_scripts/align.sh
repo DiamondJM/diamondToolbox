@@ -118,7 +118,7 @@ fi
 suffix=_XFMTO_${cost}_${mr}_do
 
 cmd="align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None"
-cmd="$cmd -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask\" -overwrite"
+cmd="$cmd -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask\" -overwrite -no_pre_weight_mask"
 echo ""
 echo $cmd
 echo ""
