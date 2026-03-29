@@ -610,8 +610,13 @@ classdef electrodeLocalizer < handle
 
             xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             if exist(xfmFile, 'file') == 2 && ~forceNew
-                fprintf('[Stage 5] CT-MR transform already exists; skipping.\n');
-                return;
+                S_chk = load(xfmFile, 'aff1D');
+                fi = dir(S_chk.aff1D);
+                if ~isempty(fi) && fi.bytes > 0
+                    fprintf('[Stage 5] CT-MR transform already exists; skipping.\n');
+                    return;
+                end
+                fprintf('[Stage 5] Stale/empty transform file detected; re-running.\n');
             end
 
             assert(exist(fullfile(self.afniBin, 'align_epi_anat.py'), 'file') == 2, ...
@@ -657,10 +662,11 @@ classdef electrodeLocalizer < handle
 
             setenv('PATH', [getenv('PATH') ':' self.afniBin]);
 
-            % Skip align.sh if the combined transform already exists.
+            % Skip align.sh if the combined transform already exists (and is non-empty).
             % align_epi_anat.py can hang on its 3dNotes history step even after
             % the actual alignment finishes; skipping avoids repeated hangs.
             hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+            hits = hits([hits.bytes] > 0);   % ignore stale empty files
             if isempty(hits)
                 % Delete stale align.sh intermediates so a retry runs clean.
                 % align.sh tools (3dWarp, 3dAutomask, @Align_Centers, etc.)
@@ -1361,6 +1367,7 @@ classdef electrodeLocalizer < handle
                 dragLimY     = [];
                 dragAxes     = [];
                 isDragging   = false;
+                lastAx       = [];   % last axes interacted with (for arrow-key scroll)
                 pixdim       = info.PixelDimensions;   % [dx dy dz] mm/vox
                 markersOut   = markersIn;
                 pendingPos   = [];   % voxel [ix,iy,iz] awaiting name entry
@@ -1797,6 +1804,7 @@ classdef electrodeLocalizer < handle
                 function cbScroll(~, evt)
                     ax = hitAxes(get(fig,'CurrentPoint'));
                     delta = -evt.VerticalScrollCount;
+                    if ~isempty(ax), lastAx = ax; end
                     if isempty(ax)
                         return
                     elseif strcmp(mode,'zoom') && ~isempty(ax)
@@ -1856,7 +1864,8 @@ classdef electrodeLocalizer < handle
                 function cbDown(~,~)
                     ax = hitAxes(get(fig,'CurrentPoint'));
                     if isempty(ax), return; end
-                    dragAxes     = ax;
+                    lastAx   = ax;
+                    dragAxes = ax;
                     cp           = get(ax,'CurrentPoint');
                     dragStart    = cp(1,1:2);
                     dragLimX     = get(ax,'XLim');
@@ -1934,6 +1943,7 @@ classdef electrodeLocalizer < handle
                     switch evt.Key
                         case 'uparrow'
                             ax = hitAxes(get(fig,'CurrentPoint'));
+                            if isempty(ax), ax = lastAx; end
                             if isequal(ax,axAx)
                                 curVox(3) = min(nz, curVox(3)+1);
                             elseif isequal(ax,axCor)
@@ -1944,6 +1954,7 @@ classdef electrodeLocalizer < handle
                             refreshAll();
                         case 'downarrow'
                             ax = hitAxes(get(fig,'CurrentPoint'));
+                            if isempty(ax), ax = lastAx; end
                             if isequal(ax,axAx)
                                 curVox(3) = max(1, curVox(3)-1);
                             elseif isequal(ax,axCor)
@@ -1987,7 +1998,9 @@ classdef electrodeLocalizer < handle
                     if idx < 1 || idx > numel(markersOut), return; end
                     markersOut(idx) = [];
                     set(hMkList,'Value', max(1, idx-1));
-                    refreshMarkers();
+                    pendingPos = curVox;
+                    set(hPlaceBtn,'Enable','on');
+                    refreshAll();
                 end
 
                 % ---- Done / close ----
