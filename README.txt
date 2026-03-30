@@ -127,6 +127,8 @@ Step 2 — Construct a sourceLocalizer object:
              (case-insensitive); falls back to first column if none match.
              BIDS *_electrodes.tsv files work directly (rename to .csv).
      .fif  — MNE/FieldTrip file; channel names read from header
+     .edf  — European Data Format; channel names read from EDF header
+             (only SEEG/EEG channels are extracted)
 
    Optional name-value argument:
       'forceNewElectrodeLocalizer', true  — re-run electrode localization even
@@ -194,7 +196,12 @@ is safe to interrupt and resume.
                                using align_epi_anat.py with lpc cost function)
   Stage 6  detectElectrodes    Threshold CT volume + connected-component
                                analysis to find electrode clusters; centroids
-                               converted to MRI RAS mm coordinates
+                               converted to MRI RAS mm coordinates.
+                               Alternatively, manualLocalize mode opens a
+                               3-panel CT slicer (axial/coronal/sagittal)
+                               where the user clicks directly on electrode
+                               contacts to place markers. See MANUAL
+                               LOCALIZATION below.
   Stage 7  namingGUI           Single-window interactive GUI: rotatable 3-D
                                brain on the left, controls on the right.
                                User names each cluster from a channel list or
@@ -207,6 +214,30 @@ is safe to interrupt and resume.
                                correction). Depth contacts retain their
                                CT-derived MR-space coordinates.
   Stage 9  writeLeads          Writes tal/leads.csv (chanName, x, y, z)
+
+Manual localization mode
+------------------------
+When automated electrode detection is unreliable (e.g. stroke patients with
+unusual CT appearance), the pipeline can be run in manual localization mode:
+
+      sl = sourceLocalizer(subj, rootFolder, 'manualLocalize', true);
+
+This replaces the automated Stage 6 with an interactive 3-panel CT slicer
+(axial, coronal, sagittal views). Usage:
+
+  - Scroll through slices using the mouse wheel or up/down arrow keys.
+    Arrow keys continue scrolling the last-used panel even after clicking
+    a button.
+  - Click on a contact in any panel to set a pending marker position.
+    The crosshair updates across all three panels simultaneously.
+  - Select a channel name from the list (populated from the channel name
+    file) or type a name in the text field, then click Place Marker.
+  - To remove a misplaced marker, select it in the Placed Markers list
+    and click Remove Marker. The pending position resets to the current
+    crosshair location so a replacement can be placed immediately.
+  - Window/level controls adjust CT contrast.
+  - Quit discards all placed markers (with confirmation).
+  - Done accepts the markers and continues to Stage 7 (namingGUI).
 
 Configuring binary paths
 ------------------------
