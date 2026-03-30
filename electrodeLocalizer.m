@@ -19,8 +19,9 @@ classdef electrodeLocalizer < handle
 %   4. runSuma           — AFNI/SUMA standard ld141 mesh → gifti files
 %   5. coregisterCT      — AFNI rigid-body CT→MR registration
 %   6. detectElectrodes  — AFNI 3dclust on CT → cluster centroids in MR space
-%   7. namingGUI         — interactive 3-D figure; user names each cluster,
-%                          labels it depth or subdural, or marks as artifact
+%   7. manualLocalize    — CT slicer: click to place contacts one-by-one,
+%                          then 3-D review (default / recommended); OR
+%      namingGUI         — auto-detected cluster naming in 3-D figure
 %   8. projectElectrodes — subdural contacts snapped to nearest pial vertex;
 %                          depth contacts kept at CT-MR coordinates
 %   9. writeLeads        — write tal/leads.csv (chanName, x, y, z)
@@ -64,7 +65,7 @@ classdef electrodeLocalizer < handle
         AFNI_CLUSTER_VMUL        = 3;     % 3dclust: minimum cluster volume in µl (vmul)
         AFNI_CLUSTER_MAX_UL      = 1000;  % max cluster volume in µl; skull blob ~15,000 µl,
                                          %   guide bolts ~1,400 µl; contacts 5–50 µl
-        SURFACE_PROXIMITY_MAX_MM = 40;    % max distance (mm) from pial surface to keep a cluster
+        SURFACE_PROXIMITY_MAX_MM = 20;    % max distance (mm) from pial surface to keep a cluster
         AFNI_MORPH_EROSION_ITER  = 3;    % morphological erosion iterations before clustering
                                          %   (each iter ≈ 1 voxel; 3 iters ≈ 1.25 mm at 0.415 mm CT)
                                          %   separates adjacent-contact blooms without destroying contacts
@@ -113,6 +114,14 @@ classdef electrodeLocalizer < handle
 
             if ~forceNew && self.isComplete()
                 fprintf('[electrodeLocalizer] Localization already complete for %s. Skipping.\n', subj);
+                % Populate chanNames from leads.csv so callers can use them
+                if isempty(self.chanNames)
+                    leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+                    if exist(leadsFile, 'file') == 2
+                        T = readtable(leadsFile, 'TextType', 'char');
+                        self.chanNames = T.chanName(:);
+                    end
+                end
                 return;
             end
 
@@ -2160,7 +2169,13 @@ classdef electrodeLocalizer < handle
                 'NumberTitle','off','Color',[0.08 0.08 0.08], ...
                 'Position',[80 80 1100 820]);
             ax = axes('Parent',fig,'Color','k', ...
-                'XColor','none','YColor','none','ZColor','none');
+                'XColor','none','YColor','none','ZColor','none', ...
+                'Position',[0 0.07 1 0.93]);
+
+            uicontrol('Parent',fig,'Style','pushbutton','String','Close', ...
+                'Units','normalized','Position',[0.82 0.01 0.16 0.05], ...
+                'BackgroundColor',[0.65 0.10 0.10],'ForegroundColor','w', ...
+                'FontSize',11,'Callback',@(~,~)delete(fig));
 
             self.renderLeadsOnAxes(ax, xyz, names);
             fprintf('[viewLeads] %d electrodes plotted for %s. Close window when done.\n', ...

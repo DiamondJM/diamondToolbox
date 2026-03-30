@@ -91,6 +91,11 @@ classdef sourceLocalizer < handle
             self.electrodeLocalizer = electrodeLocalizer( ...
                 subj, rootFolder, {}, 'forceNew', forceNewElectrodeLocalizer);
 
+            % Propagate channel names resolved during electrode localization
+            if ~isempty(self.electrodeLocalizer.chanNames)
+                self.chanNames = self.electrodeLocalizer.chanNames;
+            end
+
             %% Pull braindata
             self.retrieveBraindata;
 
@@ -137,9 +142,24 @@ classdef sourceLocalizer < handle
                 if isempty(self.chanNames)
                     self.chanNames = chanNamesFromFile;
                 elseif length(self.chanNames) ~= nCh
-                    warning('[sourceLocalizer] chanNames (%d) does not match time series channels (%d). Overwriting with names from file.', ...
-                        length(self.chanNames), nCh);
-                    self.chanNames = chanNamesFromFile;
+                    % Pre-set chanNames (e.g. from leads.csv) are the target set.
+                    % Try to find each one in the file's channel list and subset ts.
+                    [mask, idx] = ismember(strtrim(self.chanNames), strtrim(chanNamesFromFile));
+                    if any(mask)
+                        missing = self.chanNames(~mask);
+                        if ~isempty(missing)
+                            warning('[sourceLocalizer] %d channel(s) not found in EDF and will be missing: %s', ...
+                                sum(~mask), strjoin(missing, ', '));
+                        end
+                        ts = ts(:, idx(mask));
+                        self.chanNames = self.chanNames(mask);
+                        nCh = size(ts, 2);
+                        fprintf('[sourceLocalizer] Subsetted EDF to %d named channels.\n', nCh);
+                    else
+                        warning('[sourceLocalizer] chanNames (%d) does not match time series channels (%d) and no name overlap found. Overwriting with names from file.', ...
+                            length(self.chanNames), nCh);
+                        self.chanNames = chanNamesFromFile;
+                    end
                 end
                 % else: existing chanNames match → leave alone
             else
@@ -2229,18 +2249,32 @@ classdef sourceLocalizer < handle
 
         function [ts, Fs, chanNames] = loadTsFromEdf(fullPath)
             % Load time series from an EDF file.
-            % Requires MATLAB R2023a+ Signal Processing Toolbox (edfread).
+            % Requires MATLAB R2020b+ Signal Processing Toolbox (edfread/edfinfo).
 
             assert(exist('edfread', 'file') == 2, ...
-                ['edfread not found. EDF import requires MATLAB R2023a+ with the ' ...
+                ['edfread not found. EDF import requires MATLAB R2020b+ with the ' ...
                  'Signal Processing Toolbox.']);
 
-            [data, info] = edfread(fullPath, 'OutputFormat', 'array');
+            % Use edfinfo for metadata — returns a stable struct across versions
+            info      = edfinfo(fullPath);
+            Fs        = double(info.NumSamples(1)) / seconds(info.DataRecordDuration);
+            chanNames = cellstr(info.SignalLabels);
 
-            % edfread with 'array' returns [channels x samples]
-            ts        = data';
-            Fs        = info.NumSamples(1) / info.DataRecordDuration;
-            chanNames = info.SignalLabels(:);
+            % Use edfread for data — API varies by MATLAB version
+            try
+                % R2021b+: 'OutputFormat','array' returns [nSamples x nChan] double
+                data = edfread(fullPath, 'OutputFormat', 'array');
+                ts   = double(data);
+            catch
+                % R2020b fallback: returns timetable with one cell per record per channel
+                tbl     = edfread(fullPath);
+                nChan   = width(tbl);
+                cols    = cell(1, nChan);
+                for c = 1:nChan
+                    cols{c} = vertcat(tbl{:, c}{:});   % concatenate records
+                end
+                ts = double(horzcat(cols{:}));          % [nSamples x nChan]
+            end
         end
 
         function [ts, Fs, chanNames] = loadTsFromFif(fullPath)

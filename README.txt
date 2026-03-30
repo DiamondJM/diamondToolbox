@@ -116,8 +116,10 @@ Step 2 — Construct a sourceLocalizer object:
       subj        — Subject identifier string, e.g. 'NIH032'
       rootFolder  — Path to the root data folder (see folder structure above)
 
-   Channel names are not a constructor argument. They can be provided via:
-     - the file dialog that fires just before the naming GUI (create path)
+   Channel names are not a constructor argument. When localization is already
+   complete, sl.chanNames is populated automatically from leads.csv. They can
+   also be provided via:
+     - the file dialog that fires just before the CT slicer or naming GUI
      - sl.loadTimeSeries()  — populates sl.chanNames from the file header
      - sl.chanNames = myNames  — direct assignment at any time
 
@@ -127,8 +129,10 @@ Step 2 — Construct a sourceLocalizer object:
              (case-insensitive); falls back to first column if none match.
              BIDS *_electrodes.tsv files work directly (rename to .csv).
      .fif  — MNE/FieldTrip file; channel names read from header
-     .edf  — European Data Format; channel names read from EDF header
-             (only SEEG/EEG channels are extracted)
+     .edf  — European Data Format; all channel names read from EDF header.
+             If sl.chanNames is already set (e.g. from leads.csv), the EDF
+             time series is automatically subsetted to those channels,
+             discarding references, EKG, and other non-iEEG channels.
 
    Optional name-value argument:
       'forceNewElectrodeLocalizer', true  — re-run electrode localization even
@@ -202,13 +206,12 @@ is safe to interrupt and resume.
                                where the user clicks directly on electrode
                                contacts to place markers. See MANUAL
                                LOCALIZATION below.
-  Stage 7  namingGUI           Single-window interactive GUI: rotatable 3-D
-                               brain on the left, controls on the right.
-                               User names each cluster from a channel list or
-                               free-text field, selects depth vs subdural, or
-                               marks it as artifact. Back/Finish buttons allow
-                               free navigation. Brain can be rotated at any
-                               time by dragging.
+  Stage 7  manualLocalize       CT slicer: user clicks contacts directly
+             (default)         (see MANUAL LOCALIZATION below), followed by
+                               an interactive 3-D review on the brain surface.
+             namingGUI         Alternative when automated detection is used:
+                               rotatable 3-D brain with cluster naming controls
+                               (depth / subdural / artifact).
   Stage 8  projectElectrodes   Subdural contacts snapped to nearest vertex on
                                the pial-outer-smoothed surface (brain-shift
                                correction). Depth contacts retain their
@@ -237,7 +240,8 @@ This replaces the automated Stage 6 with an interactive 3-panel CT slicer
     crosshair location so a replacement can be placed immediately.
   - Window/level controls adjust CT contrast.
   - Quit discards all placed markers (with confirmation).
-  - Done accepts the markers and continues to Stage 7 (namingGUI).
+  - Done accepts the markers and opens a 3-D brain review where placed
+    contacts are shown on the pial surface. Close that window to proceed.
 
 Configuring binary paths
 ------------------------
@@ -563,6 +567,16 @@ See Trotta, et al. Human Brain Mapping 2015.
 --------------------------------------------------------------------------------
 VISUALIZATION
 --------------------------------------------------------------------------------
+
+viewLeads
+---------
+Displays a read-only 3-D brain with named electrode positions plotted as
+labelled dots. Useful for verifying localization after the pipeline completes.
+
+      sl.electrodeLocalizer.viewLeads()
+
+Loads leads.csv from disk if needed. Drag to rotate. Close button in the
+bottom-right corner closes the figure.
 
 plotDimensionsReducedWrapper  /  plotDimensionReduced
 ------------------------------------------------------
