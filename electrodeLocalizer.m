@@ -2167,6 +2167,63 @@ classdef electrodeLocalizer < handle
         end  % manualLocalize
 
         % -----------------------------------------------------------------
+        %% Standalone 3-D lead viewer
+        % -----------------------------------------------------------------
+
+        function viewLeads(self)
+            % Read-only 3-D brain viewer showing named electrode positions.
+            % Drag to rotate.  Close the window when done.
+            %
+            % Usage:  el.viewLeads()
+
+            % Load leads from disk if not in memory.
+            if isempty(self.leads)
+                leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+                assert(exist(leadsFile,'file')==2, ...
+                    '[viewLeads] leads.csv not found: %s\nRun the pipeline first.', leadsFile);
+                self.leads = readtable(leadsFile, 'TextType', 'char');
+            end
+
+            sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
+            lhFile  = fullfile(sumaDir, 'lh.pial.gii');
+            rhFile  = fullfile(sumaDir, 'rh.pial.gii');
+            assert(exist(lhFile,'file')==2 && exist(rhFile,'file')==2, ...
+                '[viewLeads] Pial surfaces not found. Re-run Stage 4.');
+            lhSurf = gifti(lhFile);
+            rhSurf = gifti(rhFile);
+
+            xyz   = [self.leads.x, self.leads.y, self.leads.z];
+            names = self.leads.chanName;
+            N     = size(xyz, 1);
+
+            fig = figure('Name', sprintf('Leads — %s', self.subj), ...
+                'NumberTitle','off','Color',[0.08 0.08 0.08], ...
+                'Position',[80 80 1100 820]);
+            ax = axes('Parent',fig,'Color','k', ...
+                'XColor','none','YColor','none','ZColor','none');
+            hold(ax,'on'); axis(ax,'equal'); axis(ax,'off');
+            view(ax,3); camlight(ax,'headlight'); material(ax,'dull');
+
+            patch(ax,'Faces',lhSurf.faces,'Vertices',lhSurf.vertices, ...
+                'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
+                'FaceAlpha',0.4,'PickableParts','none','HitTest','off');
+            patch(ax,'Faces',rhSurf.faces,'Vertices',rhSurf.vertices, ...
+                'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
+                'FaceAlpha',0.4,'PickableParts','none','HitTest','off');
+
+            scatter3(ax, xyz(:,1), xyz(:,2), xyz(:,3), 60, ...
+                repmat([0.25 0.45 0.85], N, 1), 'filled', 'HitTest','off');
+
+            for ii = 1:N
+                text(ax, xyz(ii,1), xyz(ii,2), xyz(ii,3), [' ' names{ii}], ...
+                    'Color',[0.95 0.95 0.95],'FontSize',7,'HitTest','off');
+            end
+
+            rotate3d(ax,'on');
+            fprintf('[viewLeads] %d electrodes plotted for %s. Close window when done.\n', N, self.subj);
+        end
+
+        % -----------------------------------------------------------------
         %% Stage 8 — project subdural contacts to pial surface
         % -----------------------------------------------------------------
 
