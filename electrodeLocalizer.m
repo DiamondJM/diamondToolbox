@@ -980,15 +980,6 @@ classdef electrodeLocalizer < handle
                 'FaceAlpha', 0.4, 'PickableParts', 'none', 'HitTest', 'off');
 
             dotColors = repmat([0.25 0.45 0.85], N, 1);   % dark blue — visible against brain surface
-            for ii = 1:N
-                if ~isempty(nameOut{ii})
-                    if strcmp(typeOut{ii}, 'depth')
-                        dotColors(ii,:) = [0.3 0.6 1.0];
-                    else
-                        dotColors(ii,:) = [0.3 1.0 0.5];
-                    end
-                end
-            end
             hDots = scatter3(ax, localClusters(:,1), localClusters(:,2), ...
                 localClusters(:,3), 50, dotColors, 'filled', 'HitTest', 'off');
             hHi  = scatter3(ax, NaN, NaN, NaN, 140, [1 0.8 0], 'filled', ...
