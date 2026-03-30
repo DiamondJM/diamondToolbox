@@ -2078,10 +2078,6 @@ classdef electrodeLocalizer < handle
                     return;
                 end
 
-                sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
-                lhFile  = fullfile(sumaDir, 'lh.pial.gii');
-                rhFile  = fullfile(sumaDir, 'rh.pial.gii');
-
                 bg  = [0.12 0.12 0.12];
                 fg  = [0.92 0.92 0.92];
 
@@ -2092,37 +2088,10 @@ classdef electrodeLocalizer < handle
 
                 ax3 = axes('Parent',fig3,'Position',[0.01 0.01 0.73 0.97], ...
                     'Color','k','XColor','none','YColor','none','ZColor','none');
-                hold(ax3,'on'); axis(ax3,'equal','off');
-                view(ax3,3); camlight(ax3,'headlight'); material(ax3,'dull');
 
-                if exist(lhFile,'file')==2
-                    lhS = gifti(lhFile);
-                    patch(ax3,'Faces',lhS.faces,'Vertices',lhS.vertices, ...
-                        'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
-                        'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
-                end
-                if exist(rhFile,'file')==2
-                    rhS = gifti(rhFile);
-                    patch(ax3,'Faces',rhS.faces,'Vertices',rhS.vertices, ...
-                        'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
-                        'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
-                end
-
-                mkCol  = [0.15 0.35 0.85];
-                txtCol = [0.55 0.75 1.00];
-                for mi = 1:numel(mkrs)
-                    scatter3(ax3, mkrs(mi).x, mkrs(mi).y, mkrs(mi).z, ...
-                        80, mkCol, 'filled','HitTest','off', ...
-                        'MarkerEdgeColor','w','LineWidth',0.5);
-                    text(ax3, mkrs(mi).x+1, mkrs(mi).y, mkrs(mi).z, ...
-                        mkrs(mi).chanName,'Color',txtCol,'FontSize',8, ...
-                        'FontWeight','bold','HitTest','off');
-                end
-                rotate3d(ax3,'on');
-
-                function v = ternary3(cond,a,b)
-                    if cond, v=a; else, v=b; end
-                end
+                mkrXYZ   = [[mkrs.x]', [mkrs.y]', [mkrs.z]'];
+                mkrNames = {mkrs.chanName};
+                self.renderLeadsOnAxes(ax3, mkrXYZ, mkrNames);
 
                 % Right panel
                 rx = 0.755;  rw = 0.235;
@@ -2184,43 +2153,64 @@ classdef electrodeLocalizer < handle
                 self.leads = readtable(leadsFile, 'TextType', 'char');
             end
 
-            sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
-            lhFile  = fullfile(sumaDir, 'lh.pial.gii');
-            rhFile  = fullfile(sumaDir, 'rh.pial.gii');
-            assert(exist(lhFile,'file')==2 && exist(rhFile,'file')==2, ...
-                '[viewLeads] Pial surfaces not found. Re-run Stage 4.');
-            lhSurf = gifti(lhFile);
-            rhSurf = gifti(rhFile);
-
             xyz   = [self.leads.x, self.leads.y, self.leads.z];
             names = self.leads.chanName;
-            N     = size(xyz, 1);
 
             fig = figure('Name', sprintf('Leads — %s', self.subj), ...
                 'NumberTitle','off','Color',[0.08 0.08 0.08], ...
                 'Position',[80 80 1100 820]);
             ax = axes('Parent',fig,'Color','k', ...
                 'XColor','none','YColor','none','ZColor','none');
+
+            self.renderLeadsOnAxes(ax, xyz, names);
+            fprintf('[viewLeads] %d electrodes plotted for %s. Close window when done.\n', ...
+                size(xyz,1), self.subj);
+        end
+
+        % -----------------------------------------------------------------
+        %% Shared 3-D brain + electrode renderer
+        % -----------------------------------------------------------------
+
+        function renderLeadsOnAxes(self, ax, xyz, names)
+            % Render pial brain surfaces + electrode dots + name labels
+            % onto an existing axes handle.
+            %
+            % Inputs:
+            %   ax    - axes handle to render into
+            %   xyz   - N×3 matrix of electrode positions (FreeSurfer RAS mm)
+            %   names - N×1 cell array of electrode names
+
+            sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
+            lhFile  = fullfile(sumaDir, 'lh.pial.gii');
+            rhFile  = fullfile(sumaDir, 'rh.pial.gii');
+
             hold(ax,'on'); axis(ax,'equal'); axis(ax,'off');
             view(ax,3); camlight(ax,'headlight'); material(ax,'dull');
 
-            patch(ax,'Faces',lhSurf.faces,'Vertices',lhSurf.vertices, ...
-                'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
-                'FaceAlpha',0.4,'PickableParts','none','HitTest','off');
-            patch(ax,'Faces',rhSurf.faces,'Vertices',rhSurf.vertices, ...
-                'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
-                'FaceAlpha',0.4,'PickableParts','none','HitTest','off');
+            if exist(lhFile,'file')==2
+                lhS = gifti(lhFile);
+                patch(ax,'Faces',lhS.faces,'Vertices',lhS.vertices, ...
+                    'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
+                    'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
+            end
+            if exist(rhFile,'file')==2
+                rhS = gifti(rhFile);
+                patch(ax,'Faces',rhS.faces,'Vertices',rhS.vertices, ...
+                    'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
+                    'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
+            end
 
-            scatter3(ax, xyz(:,1), xyz(:,2), xyz(:,3), 60, ...
-                repmat([0.25 0.45 0.85], N, 1), 'filled', 'HitTest','off');
-
+            N = size(xyz,1);
+            scatter3(ax, xyz(:,1), xyz(:,2), xyz(:,3), 70, ...
+                repmat([0.15 0.35 0.85], N, 1), 'filled', 'HitTest','off', ...
+                'MarkerEdgeColor','w','LineWidth',0.5);
             for ii = 1:N
-                text(ax, xyz(ii,1), xyz(ii,2), xyz(ii,3), [' ' names{ii}], ...
-                    'Color',[0.95 0.95 0.95],'FontSize',7,'HitTest','off');
+                text(ax, xyz(ii,1)+1, xyz(ii,2), xyz(ii,3), names{ii}, ...
+                    'Color',[0.55 0.75 1.00],'FontSize',8, ...
+                    'FontWeight','bold','HitTest','off');
             end
 
             rotate3d(ax,'on');
-            fprintf('[viewLeads] %d electrodes plotted for %s. Close window when done.\n', N, self.subj);
         end
 
         % -----------------------------------------------------------------
