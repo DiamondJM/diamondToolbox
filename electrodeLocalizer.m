@@ -939,6 +939,14 @@ classdef electrodeLocalizer < handle
             userQuit   = false;
 
             % Pre-populate from self.leads if a previous run exists.
+            % Fall back to leads.csv on disk if self.leads is empty
+            % (e.g. object was re-constructed after pipeline completed).
+            if isempty(self.leads)
+                leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+                if exist(leadsFile, 'file') == 2
+                    self.leads = readtable(leadsFile, 'TextType', 'char');
+                end
+            end
             % Match each cluster to the nearest lead within 15 mm.
             if ~isempty(self.leads)
                 leadsXYZ = [self.leads.x, self.leads.y, self.leads.z];
@@ -946,8 +954,8 @@ classdef electrodeLocalizer < handle
                     d2 = sum((leadsXYZ - localClusters(ii,:)).^2, 2);
                     [dmin, jj] = min(d2);
                     if sqrt(dmin) < 15
-                        nameOut{ii} = self.leads.chanName{jj};
-                        typeOut{ii} = self.leads.type{jj};
+                        nameOut{ii} = char(self.leads.chanName{jj});
+                        typeOut{ii} = char(self.leads.type{jj});
                     end
                 end
             end
@@ -971,7 +979,7 @@ classdef electrodeLocalizer < handle
                 'FaceColor', [0.75 0.70 0.65], 'EdgeColor', 'none', ...
                 'FaceAlpha', 0.4, 'PickableParts', 'none', 'HitTest', 'off');
 
-            dotColors = repmat([0 0.9 0.9], N, 1);   % cyan — visible against brain surface
+            dotColors = repmat([0.25 0.45 0.85], N, 1);   % dark blue — visible against brain surface
             for ii = 1:N
                 if ~isempty(nameOut{ii})
                     if strcmp(typeOut{ii}, 'depth')
@@ -1164,7 +1172,7 @@ classdef electrodeLocalizer < handle
                     typeOut{k}  = '';
                     artifact(k) = false;
                     c = get(hDots, 'CData');
-                    c(k, :) = [0 0.9 0.9];
+                    c(k, :) = [0.25 0.45 0.85];
                     set(hDots, 'CData', c);
                 end
                 refreshDisplay();
