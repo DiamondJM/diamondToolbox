@@ -938,6 +938,20 @@ classdef electrodeLocalizer < handle
             artifact   = false(N, 1);
             userQuit   = false;
 
+            % Pre-populate from self.leads if a previous run exists.
+            % Match each cluster to the nearest lead within 15 mm.
+            if ~isempty(self.leads)
+                leadsXYZ = [self.leads.x, self.leads.y, self.leads.z];
+                for ii = 1:N
+                    d2 = sum((leadsXYZ - localClusters(ii,:)).^2, 2);
+                    [dmin, jj] = min(d2);
+                    if sqrt(dmin) < 15
+                        nameOut{ii} = self.leads.chanName{jj};
+                        typeOut{ii} = self.leads.type{jj};
+                    end
+                end
+            end
+
             % ---- figure ----
             fig = figure('Name', sprintf('Electrode Naming — %s', self.subj), ...
                 'NumberTitle', 'off', 'Color', [0.12 0.12 0.12], ...
@@ -958,6 +972,15 @@ classdef electrodeLocalizer < handle
                 'FaceAlpha', 0.4, 'PickableParts', 'none', 'HitTest', 'off');
 
             dotColors = repmat([0 0.9 0.9], N, 1);   % cyan — visible against brain surface
+            for ii = 1:N
+                if ~isempty(nameOut{ii})
+                    if strcmp(typeOut{ii}, 'depth')
+                        dotColors(ii,:) = [0.3 0.6 1.0];
+                    else
+                        dotColors(ii,:) = [0.3 1.0 0.5];
+                    end
+                end
+            end
             hDots = scatter3(ax, localClusters(:,1), localClusters(:,2), ...
                 localClusters(:,3), 50, dotColors, 'filled', 'HitTest', 'off');
             hHi  = scatter3(ax, NaN, NaN, NaN, 140, [1 0.8 0], 'filled', ...
