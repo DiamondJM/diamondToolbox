@@ -169,14 +169,15 @@ classdef electrodeLocalizer < handle
 
             % Show setup dialog.  Imports are handled inline; dialog only
             % closes when the user clicks Create or Cancel.
-            dlg = self.localizationSetupDialog();
+            dlg = self.localizationSetupDialog(forceNew);
             if strcmp(dlg.action, 'cancel')
                 error('electrodeLocalizer:cancelled', ...
                     '[electrodeLocalizer] Setup cancelled by user.');
             end
 
-            % If imports made everything complete, nothing left to do.
-            if self.isComplete(), return; end
+            % If imports made everything complete (and we're not forcing a
+            % re-run), nothing left to do.
+            if ~forceNew && self.isComplete(), return; end
 
             self.checkPrerequisites('errorIfMissing', true);
             self.getInputFiles();
@@ -2361,14 +2362,16 @@ classdef electrodeLocalizer < handle
 
     methods (Access = private)
 
-        function dlg = localizationSetupDialog(self)
+        function dlg = localizationSetupDialog(self, forceNew)
             % Dark-themed modal dialog shown when required localization files
-            % are missing.  A listbox shows all 5 files with ✓/✗ status;
-            % selecting a row updates the description panel.  Create runs the
-            % full pipeline; Import opens sequential file dialogs for each
-            % missing file then copies them into place.
+            % are missing, or when forceNew=true.  A listbox shows all 5
+            % files with OK/blank status; selecting a row updates the
+            % description panel.  Create runs the full pipeline; Import
+            % copies an existing file into place (always allowed, even if
+            % the file is already present).
             %
             % Returns struct with .action: 'create' | 'import' | 'cancel'
+            if nargin < 2, forceNew = false; end
 
             % ---- file list -----------------------------------------------
             talDir  = fullfile(self.rootFolder, self.subj, 'tal');
@@ -2460,14 +2463,21 @@ classdef electrodeLocalizer < handle
                 'CloseRequestFcn', @cbCancel);
 
             % ---- header --------------------------------------------------
+            if forceNew
+                hdrTitle = sprintf('Re-run localization for  %s', self.subj);
+                hdrSub   = 'forceNew=true: Create re-runs the full pipeline.  Import replaces any file.';
+            else
+                hdrTitle = sprintf('Localization files not found for  %s', self.subj);
+                hdrSub   = 'Select a row to see details.  Create runs the full pipeline.  Import copies existing files.';
+            end
             uicontrol(fig, 'Style','text', ...
-                'String', sprintf('Localization files not found for  %s', self.subj), ...
+                'String', hdrTitle, ...
                 'ForegroundColor', FG, 'BackgroundColor', BG, ...
                 'FontSize', 12, 'FontWeight', 'bold', ...
                 'HorizontalAlignment', 'left', ...
                 'Position', [PAD hdrY+28 W-PAD*2 22]);
             uicontrol(fig, 'Style','text', ...
-                'String', 'Select a row to see details.  Create runs the full pipeline.  Import copies existing files.', ...
+                'String', hdrSub, ...
                 'ForegroundColor', DIM, 'BackgroundColor', BG, ...
                 'FontSize', 9, 'HorizontalAlignment', 'left', ...
                 'Position', [PAD hdrY+10 W-PAD*2 16]);
@@ -2532,10 +2542,10 @@ classdef electrodeLocalizer < handle
             end
 
             function cbImport(~,~)
-                % Import only the currently selected file; update its row
-                % in-place and stay on the dialog.
+                % Import the currently selected file; update its row
+                % in-place and stay on the dialog.  Re-import is always
+                % allowed so forceNew users can replace existing files.
                 k = get(hList, 'Value');
-                if present(k), return; end   % already imported
                 if strcmp(names{k}, 'leads.csv')
                     filt = {'*.csv', 'CSV file (*.csv)'};
                 else
