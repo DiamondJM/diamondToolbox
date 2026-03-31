@@ -118,15 +118,16 @@ fi
 suffix=_XFMTO_${cost}_${mr}_do
 
 # Call directly (not via $cmd variable) so shell properly parses the quoted
-# -Allineate_opts string and passes -rigid_body through to 3dAllineate.
+# -Allineate_opts string. -warpfreeze freezes non-rigid (scale/shear)
+# parameters, enforcing a 6-DOF rigid-body solution.
 echo ""
-echo "align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask -rigid_body -conv 0.001\" -overwrite -perc 99"
+echo "align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask -warpfreeze -conv 0.001\" -overwrite -perc 99"
 echo ""
 if [ "$run" = 1 ]; then
     align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 \
         -dset1_strip None -dset2_strip None \
         -suffix $suffix -cost $cost -deoblique off \
-        -Allineate_opts "-twopass -nomask -rigid_body -conv 0.001" \
+        -Allineate_opts "-twopass -nomask -warpfreeze -conv 0.001" \
         -overwrite -perc 99
 fi
 
