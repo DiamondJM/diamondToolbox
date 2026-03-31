@@ -707,6 +707,9 @@ classdef electrodeLocalizer < handle
                 xfmAf   = []; xfmShft = fullfile(workDir, 'ct_implant_shft.1D');
                 while toc(t0_align) < alignTimeout
                     xfmAf = dir(fullfile(workDir, sprintf('*_XFMTO_%s_*_mat.aff12.1D', cost)));
+                    % Exclude full_* (created later) and require non-empty file
+                    % (3dAllineate touches the file early as a placeholder).
+                    xfmAf = xfmAf(~strncmp({xfmAf.name}, 'full_', 5) & [xfmAf.bytes] > 0);
                     if ~isempty(xfmAf) && exist(xfmShft, 'file') == 2
                         break;
                     end
