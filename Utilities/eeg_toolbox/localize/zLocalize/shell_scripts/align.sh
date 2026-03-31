@@ -117,12 +117,18 @@ fi
 # ------------------------
 suffix=_XFMTO_${cost}_${mr}_do
 
-cmd="align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None"
-cmd="$cmd -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask -conv 0.001\" -overwrite -perc 99"
+# Call directly (not via $cmd variable) so shell properly parses the quoted
+# -Allineate_opts string and passes -rigid_body through to 3dAllineate.
 echo ""
-echo $cmd
+echo "align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask -rigid_body -conv 0.001\" -overwrite -perc 99"
 echo ""
-[ "$run" = 1 ] && $cmd
+if [ "$run" = 1 ]; then
+    align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 \
+        -dset1_strip None -dset2_strip None \
+        -suffix $suffix -cost $cost -deoblique off \
+        -Allineate_opts "-twopass -nomask -rigid_body -conv 0.001" \
+        -overwrite -perc 99
+fi
 
 xfm_af=${dset_ct}${suffix}_mat.aff12.1D
 xfm_full=full_${xfm_af}
