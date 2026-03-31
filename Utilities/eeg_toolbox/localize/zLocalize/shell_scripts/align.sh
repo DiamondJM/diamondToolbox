@@ -121,14 +121,14 @@ suffix=_XFMTO_${cost}_${mr}_do
 # -Allineate_opts string. -warpfreeze freezes non-rigid (scale/shear)
 # parameters, enforcing a 6-DOF rigid-body solution.
 echo ""
-echo "align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask -warpfreeze\" -overwrite -perc 99"
+echo "align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 -dset1_strip None -dset2_strip None -suffix $suffix -cost $cost -deoblique off -Allineate_opts \"-twopass -nomask -warpfreeze\" -overwrite -perc 99 -giant_move"
 echo ""
 if [ "$run" = 1 ]; then
     align_epi_anat.py -dset1 ${dset_mr}+orig -dset2 ${dset_ct}+orig -dset2to1 \
         -dset1_strip None -dset2_strip None \
         -suffix $suffix -cost $cost -deoblique off \
         -Allineate_opts "-twopass -nomask -warpfreeze" \
-        -overwrite -perc 99
+        -overwrite -perc 99 -giant_move
 fi
 
 xfm_af=${dset_ct}${suffix}_mat.aff12.1D
