@@ -609,14 +609,16 @@ classdef electrodeLocalizer < handle
 
         function coregisterCT(self, varargin)
             % Rigid-body coregistration of post-op CT to pre-op MRI using
-            % AFNI align.sh (LPC cost function, @Align_Centers initialisation).
+            % AFNI align.sh (@Align_Centers initialisation).
             % Saves the path to the .aff12.1D combined transform to
             % zloc/CT_1/transform/transform.mat.
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
+            addParameter(p, 'cost', 'lpc');   % alignment cost function (lpc, nmi, lpa, etc.)
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
+            cost     = p.Results.cost;
 
             xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             if exist(xfmFile, 'file') == 2 && ~forceNew
@@ -697,14 +699,14 @@ classdef electrodeLocalizer < handle
                 % align_epi_anat.py writes *_mat.aff12.1D BEFORE calling 3dNotes,
                 % so we poll for that file instead of waiting for shell exit.
                 logFile = fullfile(workDir, 'align_log.txt');
-                unix(sprintf('bash "%s" %s ct_implant "%s" > "%s" 2>&1 &', ...
-                    alignScript, mrStem, workDir, logFile));
+                unix(sprintf('bash "%s" %s ct_implant "%s" RAI %s > "%s" 2>&1 &', ...
+                    alignScript, mrStem, workDir, cost, logFile));
 
                 fprintf('[Stage 5] Running align_epi_anat.py (polling every 15 s) .');
                 t0_align = tic; alignTimeout = 3600;
                 xfmAf   = []; xfmShft = fullfile(workDir, 'ct_implant_shft.1D');
                 while toc(t0_align) < alignTimeout
-                    xfmAf = dir(fullfile(workDir, '*_XFMTO_lpc_*_mat.aff12.1D'));
+                    xfmAf = dir(fullfile(workDir, sprintf('*_XFMTO_%s_*_mat.aff12.1D', cost)));
                     if ~isempty(xfmAf) && exist(xfmShft, 'file') == 2
                         break;
                     end
@@ -737,6 +739,12 @@ classdef electrodeLocalizer < handle
 
             aff1D = fullfile(workDir, hits(1).name);
             fprintf('[Stage 5] Using AFNI transform: %s\n', hits(1).name);
+
+            % Enforce rigid-body by stripping any scale/shear from the transform.
+            % align_epi_anat.py can introduce scaling even when -rigid_body is
+            % requested (due to shell quoting of -Allineate_opts). Polar
+            % decomposition via SVD extracts the nearest pure rotation.
+            electrodeLocalizer.enforceRigidTransform(aff1D);
 
             save(xfmFile, 'aff1D');
             fprintf('[Stage 5] Transform path saved to %s\n', xfmFile);
@@ -1542,7 +1550,8 @@ classdef electrodeLocalizer < handle
                     'FontSize',10,'HorizontalAlignment','left');
                 hList = uicontrol(fig,'Style','listbox', ...
                     'Units','normalized','Position',[rx 0.68 rw 0.21], ...
-                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',11,'String',{});
+                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',11,'String',{}, ...
+                    'KeyPressFcn',@cbKey);
                 uicontrol(fig,'Style','text','String','Or type name:', ...
                     'Units','normalized','Position',[rx 0.635 rw 0.04], ...
                     'BackgroundColor',bg,'ForegroundColor',fg, ...
@@ -1550,7 +1559,8 @@ classdef electrodeLocalizer < handle
                 hEdit = uicontrol(fig,'Style','edit', ...
                     'Units','normalized','Position',[rx 0.585 rw 0.048], ...
                     'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
-                    'FontSize',11,'HorizontalAlignment','left','String','');
+                    'FontSize',11,'HorizontalAlignment','left','String','', ...
+                    'KeyPressFcn',@cbKey);
                 uicontrol(fig,'Style','text','String','Electrode type:', ...
                     'Units','normalized','Position',[rx 0.54 rw 0.04], ...
                     'BackgroundColor',bg,'ForegroundColor',fg, ...
@@ -1571,7 +1581,8 @@ classdef electrodeLocalizer < handle
                     'FontSize',10,'HorizontalAlignment','left');
                 hMkList = uicontrol(fig,'Style','listbox', ...
                     'Units','normalized','Position',[rx 0.19 rw 0.18], ...
-                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',10,'String',{});
+                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',10,'String',{}, ...
+                    'Callback',@cbMkListClick,'KeyPressFcn',@cbKey);
                 uicontrol(fig,'Style','pushbutton','String','Remove Selected', ...
                     'Units','normalized','Position',[rx 0.13 rw 0.056], ...
                     'BackgroundColor',[0.48 0.18 0.18],'ForegroundColor','w', ...
@@ -2039,6 +2050,18 @@ classdef electrodeLocalizer < handle
                     set(hEdit,'String','');
                     pendingPos = [];
                     set(hPlaceBtn,'Enable','off');
+                    refreshAll();
+                end
+
+                % ---- Double-click placed marker → jump cursor ----
+                function cbMkListClick(~,~)
+                    if ~strcmp(get(fig,'SelectionType'),'open'), return; end
+                    idx = get(hMkList,'Value');
+                    if idx < 1 || idx > numel(markersOut), return; end
+                    m = markersOut(idx);
+                    invT  = inv(Txfm);
+                    vox_h = [m.x, m.y, m.z, 1] * invT;
+                    curVox = max(1, min([nx,ny,nz], round(vox_h(1:3))));
                     refreshAll();
                 end
 
@@ -2686,6 +2709,32 @@ classdef electrodeLocalizer < handle
     end % methods (Access = private) — localizationSetupDialog
 
     methods (Static, Access = private)
+
+        function enforceRigidTransform(aff1DPath)
+            % Read an AFNI aff12.1D, strip any scale/shear via SVD polar
+            % decomposition, and write back a pure rotation + translation.
+            fid = fopen(aff1DPath, 'r');
+            C   = textscan(fid, '%f');
+            fclose(fid);
+            T = C{1}(:)';                    % 1×12 row vector
+            assert(numel(T) == 12, ...
+                'enforceRigidTransform: expected 12 values in %s, got %d', aff1DPath, numel(T));
+            % aff12.1D layout: r11 r12 r13 dx  r21 r22 r23 dy  r31 r32 r33 dz
+            A = [T(1:3); T(5:7); T(9:11)];  % 3×3 rotation matrix (one row per line)
+            t = [T(4), T(8), T(12)];         % 1×3 translation
+            [U, ~, V] = svd(A);
+            R = U * V';
+            if det(R) < 0                    % avoid improper rotation (reflection)
+                V(:,3) = -V(:,3);
+                R = U * V';
+            end
+            T_rigid = [R(1,:), t(1), R(2,:), t(2), R(3,:), t(3)];
+            fid = fopen(aff1DPath, 'w');
+            fprintf(fid, ' %12.8f', T_rigid);
+            fprintf(fid, '\n');
+            fclose(fid);
+            fprintf('[Stage 5] Rigid-body transform enforced (scale stripped).\n');
+        end
 
         function out = ternary(cond, a, b)
             % Inline ternary: returns a if cond is true, else b.
