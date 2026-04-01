@@ -304,10 +304,10 @@ classdef sourceLocalizer < handle
 
                     % Define parameters
                     self.sourceLocalizationResults.paramStruct = struct(...
-                        'propagationSpeed',300,... % mm / s
-                        'sensorDistance',30,... mm
+                        'propagationSpeed',.05,... % mm / s
+                        'sensorDistance',50,... mm
                         'subsensorLength',3,...
-                        'distanceThresh', 30); % mm
+                        'distanceThresh', 50); % mm
 
                     % These are defaults and can be adjusted.
                     % propagationSpeed is in mm/s and refers to speed of wave
@@ -388,12 +388,12 @@ classdef sourceLocalizer < handle
             %% Define parameters
 
             self.spikeDetectionResults.paramStruct = struct(...
-                'seqWin',0.1,... seconds
-                'maxNegPeakWidth',0.05,... seconds
-                'peakWin', 0.1, ... % seconds
-                'ampScale',3,... z
+                'seqWin',20 * 60,... 20 minutes, in seconds
+                'maxNegPeakWidth',60,... seconds
+                'peakWin', 2 * 60, ... % 2 minutes, in seconds
+                'ampScale',6,... z
                 'trackPeaks',false,...
-                'zThresh',3);
+                'zThresh',1);
 
             fprintf('Calling spike detector with the following parameters. These are adjustable.\n');
             disp(self.spikeDetectionResults.paramStruct);
@@ -1799,6 +1799,69 @@ classdef sourceLocalizer < handle
             xticklabels({sprintf('%s',d0{1,1}), sprintf('%s',d1{1,1})});
             yticklabels({sprintf('%s',d0{2,1}), sprintf('%s',d1{2,1})});
 
+        end
+
+        function [tsOut, FsOut] = filterSD(self, varargin)
+        % FILTERSD  Filter time series for spreading depolarization detection.
+        %
+        % Usage:
+        %   [tsSD, FsSD] = sl.filterSD()
+        %   [tsSD, FsSD] = sl.filterSD('hpFreq', 0.01, 'lpFreq', 0.5, 'targetFs', 10)
+        %
+        % Spreading depolarizations produce a large slow DC shift visible in
+        % the 0.01–0.5 Hz band. The output is bandpass filtered and optionally
+        % downsampled to reduce data size.
+        %
+        % Parameters:
+        %   hpFreq    - high-pass cutoff Hz      (default 0.01)
+        %   lpFreq    - low-pass cutoff Hz        (default 0.5)
+        %   targetFs  - downsample to this rate   (default 10 Hz; [] = skip)
+        %
+        % Output:
+        %   tsOut  - filtered [samples × channels] matrix
+        %   FsOut  - sampling rate of output
+
+            p = inputParser;
+            addParameter(p, 'hpFreq',   0.01);
+            addParameter(p, 'lpFreq',   0.5);
+            addParameter(p, 'targetFs', 10);
+            parse(p, varargin{:});
+            hpFreq   = p.Results.hpFreq;
+            lpFreq   = p.Results.lpFreq;
+            targetFs = p.Results.targetFs;
+
+            assert(~isempty(self.timeSeries), ...
+                '[filterSD] timeSeries is empty — load data first.');
+            assert(~isempty(self.Fs) && self.Fs > 0, ...
+                '[filterSD] Fs not set.');
+
+            ts  = double(self.timeSeries);   % [samples × channels]
+            Fs  = self.Fs;
+
+            assert(lpFreq < Fs/2, ...
+                '[filterSD] lpFreq (%.2f Hz) must be below Nyquist (%.1f Hz).', lpFreq, Fs/2);
+
+            % Design 4th-order zero-phase Butterworth bandpass via SOS for
+            % numerical stability at the very low normalized frequencies involved.
+            Wn = [hpFreq, lpFreq] / (Fs / 2);
+            [z, p, k] = butter(4, Wn, 'bandpass');
+            sos = zp2sos(z, p, k);
+
+            fprintf('[filterSD] Bandpass filtering %d ch at %.3f–%.2f Hz (zero-phase)...\n', ...
+                size(ts, 2), hpFreq, lpFreq);
+
+            % filtfilt with SOS: forward + backward pass, zero phase distortion
+            tsOut = filtfilt(sos, 1, ts);
+
+            % Downsample
+            FsOut = Fs;
+            if ~isempty(targetFs) && targetFs < Fs
+                [p_r, q_r] = rat(targetFs / Fs);
+                tsOut = resample(tsOut, p_r, q_r);
+                FsOut = Fs * p_r / q_r;
+                fprintf('[filterSD] Downsampled to %.4g Hz → %d samples.\n', ...
+                    FsOut, size(tsOut, 1));
+            end
         end
 
     end
