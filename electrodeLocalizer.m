@@ -337,6 +337,9 @@ classdef electrodeLocalizer < handle
             % gifti toolbox
             prereqs.gifti = exist('gifti','file') == 2;
 
+            % Signal Processing Toolbox
+            prereqs.sigproc = license('test','signal_toolbox') && ~isempty(ver('signal'));
+
             % FreeSurfer — check that recon-all exists at the expected bin path.
             % Executing it directly from MATLAB fails because recon-all is a
             % shell script that requires FREESURFER_HOME to be set, which GUI
@@ -350,6 +353,12 @@ classdef electrodeLocalizer < handle
 
             % --- Determine which missing items are actually required ---
             missing = {};
+
+            if ~prereqs.sigproc
+                missing{end+1} = sprintf( ...
+                    '  [REQUIRED] Signal Processing Toolbox\n%s', ...
+                    '             Needed for: EEG time-series processing');
+            end
 
             if ~prereqs.gifti
                 missing{end+1} = sprintf( ...
@@ -378,6 +387,7 @@ classdef electrodeLocalizer < handle
             fprintf('\n+----------------------------------------------------------+\n');
             fprintf('|       electrodeLocalizer — Prerequisites (%s)\n', self.subj);
             fprintf('+----------------------------------------------------------+\n');
+            electrodeLocalizer.printPrereqLine('Signal Processing Toolbox', prereqs.sigproc,               true);
             electrodeLocalizer.printPrereqLine('gifti toolbox',             prereqs.gifti,                 true);
             electrodeLocalizer.printPrereqLine(sprintf('FreeSurfer  (%s)', self.fsBin),  prereqs.freesurfer, needSurface);
             electrodeLocalizer.printPrereqLine(sprintf('AFNI/SUMA   (%s)', self.afniBin), prereqs.afni,      needSuma);
