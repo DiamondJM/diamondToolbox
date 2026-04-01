@@ -608,17 +608,24 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function coregisterCT(self, varargin)
-            % Rigid-body coregistration of post-op CT to pre-op MRI using
-            % AFNI align.sh (@Align_Centers initialisation).
-            % Saves the path to the .aff12.1D combined transform to
-            % zloc/CT_1/transform/transform.mat.
+            % CT-to-MR coregistration.
+            % Default method is 'manual': launches FreeView for user to align CT to MRI.
+            % Use 'method','auto' for automatic AFNI alignment.
+            % Saves result to zloc/CT_1/transform/transform.mat.
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'cost', 'lpc');   % alignment cost function (lpc, nmi, lpa, etc.)
+            addParameter(p, 'method',   'manual');  % 'manual' or 'auto'
+            addParameter(p, 'cost', 'lpc');          % auto only: alignment cost function
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
+            method   = p.Results.method;
             cost     = p.Results.cost;
+
+            if strcmp(method, 'manual')
+                self.manualCoregisterCT('forceNew', forceNew);
+                return;
+            end
 
             xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             if exist(xfmFile, 'file') == 2 && ~forceNew
@@ -636,10 +643,10 @@ classdef electrodeLocalizer < handle
 
             fprintf('[Stage 5] Coregistering CT to MR via AFNI align.sh...\n');
 
-            ctNii = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
-            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s', ctNii);
+            ctNii      = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
             mrNii      = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
             mrWorkName = 'mr_pre.nii';
+            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s', ctNii);
             assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
 
             alignScript = fullfile(fileparts(mfilename('fullpath')), ...
@@ -755,6 +762,56 @@ classdef electrodeLocalizer < handle
 
 
         % -----------------------------------------------------------------
+        %% Stage 5 (manual) — FreeView-based manual CT-to-MR coregistration
+        % -----------------------------------------------------------------
+
+        function manualCoregisterCT(self, varargin)
+            % Launch FreeView for the user to manually align the CT to the MRI.
+            % The user should use Tools > Transform Volume in FreeView to align
+            % the CT, then File > Save Volume As to save the registered CT as:
+            %   <transform_dir>/ct_manual_coreg.nii
+            % MATLAB waits for confirmation, then stores the path in transform.mat.
+
+            p = inputParser;
+            addParameter(p, 'forceNew', false);
+            parse(p, varargin{:});
+            forceNew = p.Results.forceNew;
+
+            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
+            if exist(xfmFile, 'file') == 2 && ~forceNew
+                S_chk = load(xfmFile);
+                if isfield(S_chk, 'manual') && S_chk.manual && ...
+                        isfield(S_chk, 'ctCoregNii') && exist(S_chk.ctCoregNii, 'file') == 2
+                    fprintf('[Stage 5] Manual CT-MR registration already exists; skipping.\n');
+                    return;
+                end
+            end
+
+            ctNii = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
+            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s', ctNii);
+            assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
+
+            workDir    = self.locDirs.ct_1_xfm;
+            ctWork     = fullfile(workDir, 'ct_implant.nii');
+            mrWork     = fullfile(workDir, 'mr_pre.nii');
+            ctCoregNii = fullfile(workDir, 'ct_manual_coreg.nii');
+
+            if exist(ctWork, 'file') ~= 2, copyfile(ctNii, ctWork); end
+            if exist(mrWork, 'file') ~= 2, copyfile(mrNii, mrWork); end
+
+            fprintf('[Stage 5] Opening CT-MR registration GUI...\n');
+            ctCoregNii = self.ctMrRegistrationGUI(mrWork, ctWork, workDir);
+
+            assert(~isempty(ctCoregNii) && exist(ctCoregNii,'file')==2, ...
+                '[manualCoregisterCT] Registration cancelled or file not saved.');
+
+            manual = true;  %#ok<NASGU>
+            save(xfmFile, 'manual', 'ctCoregNii');
+            fprintf('[Stage 5] Manual coregistration saved: %s\n', ctCoregNii);
+        end
+
+        % -----------------------------------------------------------------
         %% Stage 6 — electrode cluster detection via AFNI
         % -----------------------------------------------------------------
 
@@ -784,30 +841,47 @@ classdef electrodeLocalizer < handle
 
             fprintf('[Stage 6] Detecting electrode clusters via AFNI 3dclust...\n');
 
-            % Load the AFNI transform path saved by coregisterCT
-            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
+            % Load coregistration result
+            workDir = self.locDirs.ct_1_xfm;
+            xfmFile = fullfile(workDir, 'transform.mat');
             assert(exist(xfmFile, 'file') == 2, ...
                 '[electrodeLocalizer] Run coregisterCT before detectElectrodes.');
-            S = load(xfmFile, 'aff1D');
-            aff1D = S.aff1D;
+            S_xfm = load(xfmFile);
 
-            % Verify the .aff12.1D file still exists; fall back to glob search
-            if exist(aff1D, 'file') ~= 2
-                hits = dir(fullfile(self.locDirs.ct_1_xfm, 'full_*.aff12.1D'));
-                assert(~isempty(hits), ...
-                    '[Stage 6] AFNI transform (.aff12.1D) not found. Re-run coregisterCT.');
-                aff1D = fullfile(self.locDirs.ct_1_xfm, hits(1).name);
-                fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
+            if isfield(S_xfm, 'manual') && S_xfm.manual
+                % Manual coregistration: CT already in MRI space.
+                % Resample to RAI for AFNI clustering, use identity transform.
+                ctCoregNii = S_xfm.ctCoregNii;
+                assert(exist(ctCoregNii,'file')==2, ...
+                    '[Stage 6] ct_manual_coreg.nii not found: %s', ctCoregNii);
+                ctBrik = fullfile(workDir, 'ct_manual_coreg+orig');
+                if ~exist([ctBrik '.BRIK'],'file') && ~exist([ctBrik '.BRIK.gz'],'file')
+                    fprintf('[Stage 6] Converting manual coreg CT to AFNI BRIK...\n');
+                    setenv('PATH', [getenv('PATH') ':' self.afniBin]);
+                    cmd = sprintf('"%s/3dcopy" "%s" "%s"', self.afniBin, ctCoregNii, ctBrik);
+                    unix(cmd);
+                end
+                % Write identity aff12.1D (CT already in MRI space)
+                aff1D = fullfile(workDir, 'identity.aff12.1D');
+                fid = fopen(aff1D, 'w');
+                fprintf(fid, ' 1 0 0 0 0 1 0 0 0 0 1 0\n');
+                fclose(fid);
+                fprintf('[Stage 6] Using manual coregistration with identity transform.\n');
+            else
+                % Automatic (AFNI) coregistration
+                aff1D = S_xfm.aff1D;
+                if exist(aff1D, 'file') ~= 2
+                    hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+                    assert(~isempty(hits), ...
+                        '[Stage 6] AFNI transform (.aff12.1D) not found. Re-run coregisterCT.');
+                    aff1D = fullfile(workDir, hits(1).name);
+                    fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
+                end
+                ctBrik = fullfile(workDir, 'ct_implant+orig');
+                assert(exist([ctBrik '.BRIK'], 'file') == 2 || ...
+                       exist([ctBrik '.BRIK.gz'], 'file') == 2, ...
+                    '[Stage 6] CT BRIK not found: %s.BRIK(.gz)\n  Re-run coregisterCT.', ctBrik);
             end
-
-
-            % CT BRIK created by align.sh (3dresample -orient RAI).
-            % AFNI writes compressed BRIK.gz by default; check both forms.
-            workDir = self.locDirs.ct_1_xfm;
-            ctBrik  = fullfile(workDir, 'ct_implant+orig');
-            assert(exist([ctBrik '.BRIK'], 'file') == 2 || ...
-                   exist([ctBrik '.BRIK.gz'], 'file') == 2, ...
-                '[Stage 6] CT BRIK not found: %s.BRIK(.gz)\n  Re-run coregisterCT.', ctBrik);
 
             % Ensure AFNI tools are on PATH
             setenv('PATH', [getenv('PATH') ':' self.afniBin]);
@@ -1217,20 +1291,26 @@ classdef electrodeLocalizer < handle
             % names each one, then reviews placements in 3-D.
             % Results stored in self.leads (chanName, x, y, z, type).
 
-            ctFile = fullfile(self.locDirs.ct_1_xfm, 'ct_implant.nii');
-            assert(exist(ctFile,'file')==2, ...
-                '[manualLocalize] Coregistered CT not found: %s\nRun coregisterCT first.', ctFile);
-
-            % Load CT→MR transform (produced by coregisterCT) for coord xfm.
-            xfmFilePath = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
+            workDir     = self.locDirs.ct_1_xfm;
+            xfmFilePath = fullfile(workDir, 'transform.mat');
             assert(exist(xfmFilePath,'file')==2, ...
                 '[manualLocalize] CT-MR transform not found. Run coregisterCT first.');
-            S_xfm   = load(xfmFilePath, 'aff1D');
-            aff1D   = S_xfm.aff1D;
-            workDir = self.locDirs.ct_1_xfm;
-            ctBrik  = fullfile(workDir, 'ct_implant+orig');
-            assert(exist([ctBrik '.BRIK'],'file')==2 || exist([ctBrik '.BRIK.gz'],'file')==2, ...
-                '[manualLocalize] CT BRIK not found: %s.BRIK(.gz)\nRun coregisterCT first.', ctBrik);
+            S_xfm = load(xfmFilePath);
+
+            isManualCoreg = isfield(S_xfm, 'manual') && S_xfm.manual;
+            if isManualCoreg
+                ctFile = S_xfm.ctCoregNii;
+                assert(exist(ctFile,'file')==2, ...
+                    '[manualLocalize] ct_manual_coreg.nii not found: %s\nRe-run manualCoregisterCT.', ctFile);
+            else
+                ctFile = fullfile(workDir, 'ct_implant.nii');
+                assert(exist(ctFile,'file')==2, ...
+                    '[manualLocalize] Coregistered CT not found: %s\nRun coregisterCT first.', ctFile);
+                aff1D  = S_xfm.aff1D;
+                ctBrik = fullfile(workDir, 'ct_implant+orig');
+                assert(exist([ctBrik '.BRIK'],'file')==2 || exist([ctBrik '.BRIK.gz'],'file')==2, ...
+                    '[manualLocalize] CT BRIK not found: %s.BRIK(.gz)\nRun coregisterCT first.', ctBrik);
+            end
 
             % ---- Load CT ----
             info = niftiinfo(ctFile);
@@ -1238,8 +1318,8 @@ classdef electrodeLocalizer < handle
             Txfm = info.Transform.T;                 % 4×4 MATLAB affine (1-based vox → world)
             [nx, ny, nz] = size(vol);
 
-            % vox2mm: 1-based [i,j,k] row-vector → world mm row-vector
-            vox2mm = @(v) ([v, 1] * Txfm);
+            % vox2mm: 1-based [i,j,k] row-vector(s) → world mm row-vector(s)
+            vox2mm = @(v) ([v, ones(size(v,1),1)] * Txfm);
 
             % ---- Sort chanNames (same logic as namingGUI) ----
             sortedChanNames = self.chanNames;
@@ -1323,57 +1403,62 @@ classdef electrodeLocalizer < handle
                     vox_0(mi,:) = round(vox_h(1:3)) - 1;
                 end
 
-                % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
-                % Flip each axis where NIfTI and BRIK directions are opposite.
-                % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
-                ct_bvox = vox_0;
-                if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
-                if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
-                if Txfm(3,3) > 0, ct_bvox(:,3) = (nz-1) - ct_bvox(:,3); end
+                if isManualCoreg
+                    % ---- Manual coreg shortcut ----
+                    % CT NIfTI is already in MRI world space (FreeView baked the
+                    % user's transform into the header). vox2mm gives FS RAS directly.
+                    world_h = vox2mm(vox_0);      % nReal × 4
+                    xyzFS   = world_h(:, 1:3);
+                else
+                    % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
+                    % Flip each axis where NIfTI and BRIK directions are opposite.
+                    % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
+                    ct_bvox = vox_0;
+                    if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
+                    if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
+                    if Txfm(3,3) > 0, ct_bvox(:,3) = (nz-1) - ct_bvox(:,3); end
 
-                % ---- Step 3: CT BRIK voxel → CT AFNI DICOM ----
-                [~, ct_hdr] = unix(sprintf('"%s/3dinfo" -di -dj -dk -o3 "%s+orig" 2>/dev/null', ...
-                    self.afniBin, fullfile(workDir,'ct_implant')));
-                ct_v = sscanf(ct_hdr, '%f');   % [di dj dk ox oy oz]
-                ct_vs  = ct_v(1:3)';
-                ct_org = ct_v(4:6)';
-                ct_dicom = ct_bvox .* ct_vs + ct_org;
+                    % ---- Step 3: CT BRIK voxel → CT AFNI DICOM ----
+                    [~, ct_hdr] = unix(sprintf('"%s/3dinfo" -di -dj -dk -o3 "%s+orig" 2>/dev/null', ...
+                        self.afniBin, fullfile(workDir,'ct_implant')));
+                    ct_v = sscanf(ct_hdr, '%f');   % [di dj dk ox oy oz]
+                    ct_vs  = ct_v(1:3)';
+                    ct_org = ct_v(4:6)';
+                    ct_dicom = ct_bvox .* ct_vs + ct_org;
 
-                % ---- Step 4: CT AFNI DICOM → MR AFNI DICOM via inv(aff12.1D) ----
-                fid    = fopen(aff1D, 'r');
-                M_vals = fscanf(fid, '%f', 12);
-                fclose(fid);
-                M_raw  = reshape(M_vals(:), 4, 3)';   % 3×4 (column-major fill → transpose)
-                M4     = [M_raw; 0 0 0 1];
-                invM4  = inv(M4);
-                ct_h     = [ct_dicom, ones(nReal,1)]';  % 4 × nReal
-                mr_dicom = (invM4 * ct_h)';             % nReal × 4
-                mr_dicom = mr_dicom(:,1:3);
+                    % ---- Step 4: CT AFNI DICOM → MR AFNI DICOM via inv(aff12.1D) ----
+                    fid    = fopen(aff1D, 'r');
+                    M_vals = fscanf(fid, '%f', 12);
+                    fclose(fid);
+                    M_raw  = reshape(M_vals(:), 4, 3)';   % 3×4 (column-major fill → transpose)
+                    M4     = [M_raw; 0 0 0 1];
+                    invM4  = inv(M4);
+                    ct_h     = [ct_dicom, ones(nReal,1)]';  % 4 × nReal
+                    mr_dicom = (invM4 * ct_h)';             % nReal × 4
+                    mr_dicom = mr_dicom(:,1:3);
 
-                mrBrikDir   = workDir;
-                mrNiiForXfm = fullfile(workDir, 'mr_pre.nii');
+                    % ---- Step 5: MR AFNI DICOM → MR BRIK voxel ----
+                    [~, mr_hdr] = unix(sprintf('"%s/3dinfo" -ni -nj -nk -di -dj -dk -o3 "%s" 2>/dev/null', ...
+                        self.afniBin, fullfile(workDir,'mr_pre_do+orig')));
+                    mr_v       = sscanf(mr_hdr, '%f');   % [ni nj nk di dj dk ox oy oz]
+                    mr_brik_dims = mr_v(1:3)';
+                    mr_vs        = mr_v(4:6)';
+                    mr_org       = mr_v(7:9)';
+                    mr_bvox = round((mr_dicom - mr_org) ./ mr_vs);
 
-                % ---- Step 5: MR AFNI DICOM → MR BRIK voxel ----
-                [~, mr_hdr] = unix(sprintf('"%s/3dinfo" -ni -nj -nk -di -dj -dk -o3 "%s" 2>/dev/null', ...
-                    self.afniBin, fullfile(mrBrikDir,'mr_pre_do+orig')));
-                mr_v       = sscanf(mr_hdr, '%f');   % [ni nj nk di dj dk ox oy oz]
-                mr_brik_dims = mr_v(1:3)';
-                mr_vs        = mr_v(4:6)';
-                mr_org       = mr_v(7:9)';
-                mr_bvox = round((mr_dicom - mr_org) ./ mr_vs);
+                    % ---- Step 6: MR BRIK voxel → mr_pre.nii voxel ----
+                    % RAI BRIK and mr_pre.nii (LPS) have all 3 axes reversed.
+                    % Use mr_brik_dims (not mr_nii dims) because the de-obliqued
+                    % BRIK has more z-slices (278) than the original NIfTI (250).
+                    mr_nii_vox = (mr_brik_dims - 1) - mr_bvox;
 
-                % ---- Step 6: MR BRIK voxel → mr_pre.nii voxel ----
-                % RAI BRIK and mr_pre.nii (LPS) have all 3 axes reversed.
-                % Use mr_brik_dims (not mr_nii dims) because the de-obliqued
-                % BRIK has more z-slices (278) than the original NIfTI (250).
-                mr_nii_vox = (mr_brik_dims - 1) - mr_bvox;
-
-                % ---- Step 7: mr_pre.nii voxel → NIfTI RAS ----
-                mr_nii_info = niftiinfo(mrNiiForXfm);
-                mr_T = mr_nii_info.Transform.T;  % 4×4 MATLAB affine (1-based row-vec → world)
-                mr_vox_1 = mr_nii_vox + 1;       % 0-indexed → 1-indexed
-                mr_ras_h = [mr_vox_1, ones(nReal,1)] * mr_T;  % nReal × 4
-                xyzFS = mr_ras_h(:, 1:3);
+                    % ---- Step 7: mr_pre.nii voxel → NIfTI RAS ----
+                    mr_nii_info = niftiinfo(fullfile(workDir, 'mr_pre.nii'));
+                    mr_T = mr_nii_info.Transform.T;  % 4×4 MATLAB affine (1-based row-vec → world)
+                    mr_vox_1 = mr_nii_vox + 1;       % 0-indexed → 1-indexed
+                    mr_ras_h = [mr_vox_1, ones(nReal,1)] * mr_T;  % nReal × 4
+                    xyzFS = mr_ras_h(:, 1:3);
+                end
 
                 mkrsFS = mkrs;
                 for mi = 1:nReal
@@ -2367,6 +2452,527 @@ classdef electrodeLocalizer < handle
                 end
             end
         end
+
+        function ctCoregNii = ctMrRegistrationGUI(~, mrNii, ctNii, outputDir)
+        % Interactive rigid-body CT-MR registration GUI.
+        % Drag modes: Translate | Rotate | Scale in axial/coronal/sagittal.
+        % Save resamples CT onto MRI grid and writes ct_manual_coreg.nii.
+
+        %% ---- Load volumes ----
+        mrInfo = niftiinfo(mrNii);
+        mrVol  = double(niftiread(mrInfo));
+        ctInfo = niftiinfo(ctNii);
+        ctVol  = double(niftiread(ctInfo));
+
+        [nxMr, nyMr, nzMr] = size(mrVol);
+        pdMr = mrInfo.PixelDimensions(1:3);
+
+        Tmr = mrInfo.Transform.T;
+        Tct = ctInfo.Transform.T;
+
+        %% ---- State ----
+        tx = 0; ty = 0; tz = 0;
+        rx = 0; ry = 0; rz = 0;
+        sc = 1.0;
+        ctAlpha = 0.5;
+        curVox = [round(nxMr/2), round(nyMr/2), round(nzMr/2)];
+        mode_ = 'translate';
+
+        mrWW = 1000; mrWL = 500;
+        ctWW = 3000; ctWL = 700;
+
+        ctCtrVox   = [(size(ctVol,1)+1)/2, (size(ctVol,2)+1)/2, (size(ctVol,3)+1)/2];
+        ctCtrWorld = [ctCtrVox, 1] * Tct;
+
+        isDragging   = false;
+        dragFigStart = [];
+        dragState0   = [];
+        dragAxSel    = [];
+
+        SENS_TR  = 0.5;
+        SENS_ROT = 0.3;
+        SENS_SC  = 0.001;
+
+        %% ---- Orientation flags ----
+        colX_ = Tmr(1:3,1);  colY_ = Tmr(1:3,2);  colZ_ = Tmr(1:3,3);
+        ax_xFlip  = colX_(1) > 0;
+        ax_yFlip  = colY_(2) < 0;
+        cor_xFlip = colX_(1) > 0;
+        cor_yTop  = colZ_(3) < 0;
+        sag_xFlip = colY_(2) < 0;
+
+        %% ---- Colours ----
+        bg  = [0.10 0.10 0.10];
+        bg2 = [0.18 0.18 0.18];
+        bg3 = [0.22 0.22 0.22];
+        fg  = [0.92 0.92 0.92];
+
+        %% ---- Figure ----
+        ctCoregNii = '';
+        fig = figure('Name','CT-MR Registration', ...
+            'NumberTitle','off','Color',bg, ...
+            'Position',[30 30 1500 870], ...
+            'WindowKeyPressFcn',    @cbKey, ...
+            'WindowScrollWheelFcn', @cbScroll, ...
+            'WindowButtonDownFcn',  @cbDown, ...
+            'WindowButtonMotionFcn',@cbMotion, ...
+            'WindowButtonUpFcn',    @cbUp, ...
+            'CloseRequestFcn',      @cbClose);
+
+        %% ---- Toolbar row 1 ----
+        tbH  = 0.048;  tb1Y = 0.950;  tb2Y = tb1Y - tbH - 0.006;
+
+        uicontrol(fig,'Style','text','String','Mode:', ...
+            'Units','normalized','Position',[0.01 tb1Y 0.04 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+        btnTr = uicontrol(fig,'Style','togglebutton','String','Translate', ...
+            'Units','normalized','Position',[0.055 tb1Y 0.082 tbH], ...
+            'BackgroundColor',[0.25 0.55 0.25],'ForegroundColor','w', ...
+            'FontSize',10,'Value',1,'Callback',@(~,~)setMode_('translate'));
+        btnRot = uicontrol(fig,'Style','togglebutton','String','Rotate', ...
+            'Units','normalized','Position',[0.142 tb1Y 0.072 tbH], ...
+            'BackgroundColor',bg2,'ForegroundColor',fg, ...
+            'FontSize',10,'Value',0,'Callback',@(~,~)setMode_('rotate'));
+        btnSc = uicontrol(fig,'Style','togglebutton','String','Scale', ...
+            'Units','normalized','Position',[0.219 tb1Y 0.065 tbH], ...
+            'BackgroundColor',bg2,'ForegroundColor',fg, ...
+            'FontSize',10,'Value',0,'Callback',@(~,~)setMode_('scale'));
+        uicontrol(fig,'Style','text', ...
+            'String','Drag to transform CT  |  Click to move crosshair  |  Scroll: slice  |  Shift: fine', ...
+            'Units','normalized','Position',[0.295 tb1Y 0.44 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',[0.5 0.5 0.5],'FontSize',9, ...
+            'HorizontalAlignment','left');
+
+        %% ---- Toolbar row 2 ----
+        uicontrol(fig,'Style','text','String','MR W:', ...
+            'Units','normalized','Position',[0.01 tb2Y 0.040 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',9);
+        hMrW = uicontrol(fig,'Style','edit','String',num2str(mrWW), ...
+            'Units','normalized','Position',[0.053 tb2Y 0.055 tbH], ...
+            'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',9,'Callback',@cbWL);
+        uicontrol(fig,'Style','text','String','L:', ...
+            'Units','normalized','Position',[0.110 tb2Y 0.020 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',9);
+        hMrL = uicontrol(fig,'Style','edit','String',num2str(mrWL), ...
+            'Units','normalized','Position',[0.133 tb2Y 0.055 tbH], ...
+            'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',9,'Callback',@cbWL);
+        uicontrol(fig,'Style','text','String','CT W:', ...
+            'Units','normalized','Position',[0.198 tb2Y 0.040 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',9);
+        hCtW = uicontrol(fig,'Style','edit','String',num2str(ctWW), ...
+            'Units','normalized','Position',[0.241 tb2Y 0.055 tbH], ...
+            'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',9,'Callback',@cbWL);
+        uicontrol(fig,'Style','text','String','L:', ...
+            'Units','normalized','Position',[0.298 tb2Y 0.020 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',9);
+        hCtL = uicontrol(fig,'Style','edit','String',num2str(ctWL), ...
+            'Units','normalized','Position',[0.321 tb2Y 0.055 tbH], ...
+            'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',9,'Callback',@cbWL);
+        uicontrol(fig,'Style','text','String','CT opacity:', ...
+            'Units','normalized','Position',[0.387 tb2Y 0.065 tbH], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',9);
+        hAlphaSlider = uicontrol(fig,'Style','slider','Min',0,'Max',1,'Value',ctAlpha, ...
+            'Units','normalized','Position',[0.455 tb2Y+0.005 0.09 tbH*0.8], ...
+            'Callback',@cbAlpha);
+        addlistener(hAlphaSlider,'Value','PostSet',@(~,~)cbAlphaLive());
+
+        %% ---- Slice panels ----
+        figPos  = get(fig,'Position');
+        panW    = 0.220;  scrollW = 0.013;
+        panH    = panW * figPos(3) / figPos(4);
+        panY    = (tb2Y - panH) / 2 + 0.005;
+
+        axAxX  = 0.005;
+        slAxX  = axAxX  + panW + 0.001;
+        axCorX = slAxX  + scrollW + 0.006;
+        slCorX = axCorX + panW + 0.001;
+        axSagX = slCorX + scrollW + 0.006;
+        slSagX = axSagX + panW + 0.001;
+
+        axAx  = axes('Parent',fig,'Position',[axAxX  panY panW panH], ...
+            'Color','k','XColor','none','YColor','none'); hold(axAx,'on');
+        axCor = axes('Parent',fig,'Position',[axCorX panY panW panH], ...
+            'Color','k','XColor','none','YColor','none'); hold(axCor,'on');
+        axSag = axes('Parent',fig,'Position',[axSagX panY panW panH], ...
+            'Color','k','XColor','none','YColor','none'); hold(axSag,'on');
+
+        hSlAx  = uicontrol(fig,'Style','slider','Min',1,'Max',nzMr,'Value',curVox(3), ...
+            'SliderStep',[1/(nzMr-1), 10/(nzMr-1)], ...
+            'Units','normalized','Position',[slAxX  panY scrollW panH], ...
+            'BackgroundColor',bg2,'Callback',@(~,~)cbSlider(1));
+        hSlCor = uicontrol(fig,'Style','slider','Min',1,'Max',nyMr,'Value',curVox(2), ...
+            'SliderStep',[1/(nyMr-1), 10/(nyMr-1)], ...
+            'Units','normalized','Position',[slCorX panY scrollW panH], ...
+            'BackgroundColor',bg2,'Callback',@(~,~)cbSlider(2));
+        hSlSag = uicontrol(fig,'Style','slider','Min',1,'Max',nxMr,'Value',curVox(1), ...
+            'SliderStep',[1/(nxMr-1), 10/(nxMr-1)], ...
+            'Units','normalized','Position',[slSagX panY scrollW panH], ...
+            'BackgroundColor',bg2,'Callback',@(~,~)cbSlider(3));
+        addlistener(hSlAx,  'Value','PostSet',@(~,~)cbSlider(1));
+        addlistener(hSlCor, 'Value','PostSet',@(~,~)cbSlider(2));
+        addlistener(hSlSag, 'Value','PostSet',@(~,~)cbSlider(3));
+
+        hImAx  = []; hImCor = []; hImSag = [];
+        hXHax  = []; hXHcor = []; hXHsag = [];
+        hTitleAx  = title(axAx,  '','Color',fg,'FontSize',9);
+        hTitleCor = title(axCor, '','Color',fg,'FontSize',9);
+        hTitleSag = title(axSag, '','Color',fg,'FontSize',9);
+
+        %% ---- Status bar ----
+        hStatus = uicontrol(fig,'Style','text', ...
+            'Units','normalized','Position',[0.005 0.003 0.73 0.038], ...
+            'BackgroundColor',bg,'ForegroundColor',[0.5 0.8 1.0], ...
+            'FontSize',9,'HorizontalAlignment','left','String','');
+
+        %% ---- Right panel ----
+        rp = 0.742;  rw = 0.253;
+        uicontrol(fig,'Style','text','String','CT-MR Registration', ...
+            'Units','normalized','Position',[rp 0.900 rw 0.048], ...
+            'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',12,'FontWeight','bold');
+
+        labels_  = {'Tx (mm):','Ty (mm):','Tz (mm):','Rx (°):','Ry (°):','Rz (°):','Scale:'};
+        hReadout = gobjects(1,7);
+        for ii = 1:7
+            yy = 0.840 - (ii-1)*0.052;
+            uicontrol(fig,'Style','text','String',labels_{ii}, ...
+                'Units','normalized','Position',[rp yy 0.095 0.038], ...
+                'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10, ...
+                'HorizontalAlignment','right');
+            hReadout(ii) = uicontrol(fig,'Style','edit','String','0.0', ...
+                'Units','normalized','Position',[rp+0.100 yy 0.080 0.038], ...
+                'BackgroundColor',bg2,'ForegroundColor',[0.3 0.9 0.3],'FontSize',10, ...
+                'HorizontalAlignment','center', ...
+                'Callback',@(h,~) cbEditParam(ii, str2double(get(h,'String'))));
+        end
+
+        uicontrol(fig,'Style','pushbutton','String','Align Centers', ...
+            'Units','normalized','Position',[rp 0.265 rw*0.95 0.048], ...
+            'BackgroundColor',[0.3 0.45 0.6],'ForegroundColor','w', ...
+            'FontSize',10,'Callback',@cbAlignCenters);
+        uicontrol(fig,'Style','pushbutton','String','Reset Transform', ...
+            'Units','normalized','Position',[rp 0.208 rw*0.95 0.048], ...
+            'BackgroundColor',[0.55 0.25 0.25],'ForegroundColor','w', ...
+            'FontSize',10,'Callback',@cbReset);
+        uicontrol(fig,'Style','pushbutton','String','Save', ...
+            'Units','normalized','Position',[rp 0.100 rw*0.44 0.065], ...
+            'BackgroundColor',[0.2 0.5 0.2],'ForegroundColor','w', ...
+            'FontSize',12,'FontWeight','bold','Callback',@cbSave);
+        uicontrol(fig,'Style','pushbutton','String','Cancel', ...
+            'Units','normalized','Position',[rp+rw*0.51 0.100 rw*0.44 0.065], ...
+            'BackgroundColor',[0.5 0.25 0.25],'ForegroundColor','w', ...
+            'FontSize',12,'Callback',@cbClose);
+
+        %% ---- Initial draw ----
+        refreshAll();
+        uiwait(fig);
+
+        % ==============================================================
+        % Nested functions
+        % ==============================================================
+
+            function T = buildRegTransform()
+                ctr = ctCtrWorld(1:3);
+                Tc  = eye(4);  Tc(4,1:3)  = -ctr;
+                Tci = eye(4);  Tci(4,1:3) =  ctr;
+                Ttr = eye(4);  Ttr(4,1:3) = [tx ty tz];
+                S   = diag([sc sc sc 1]);
+                cx = cosd(rx); sx_ = sind(rx);
+                cy = cosd(ry); sy_ = sind(ry);
+                cz = cosd(rz); sz_ = sind(rz);
+                Rx = [1  0    0   0; 0  cx   sx_ 0; 0 -sx_  cx  0; 0  0    0   1];
+                Ry = [cy  0  -sy_ 0; 0   1   0   0; sy_ 0   cy  0; 0   0   0   1];
+                Rz = [cz  sz_ 0  0; -sz_ cz  0  0;  0   0   1  0;  0   0   0   1];
+                T = Tc * S * Rx * Ry * Rz * Tci * Ttr;
+            end
+
+            function M = buildSamplingMatrix()
+                T_reg = buildRegTransform();
+                M = Tmr / T_reg / Tct;
+            end
+
+            function ctSlice = sampleCTslice(dim, sliceIdx)
+                M = buildSamplingMatrix();
+                switch dim
+                    case 1
+                        [jj, ii] = meshgrid(1:nyMr, 1:nxMr);
+                        kk = repmat(sliceIdx, nxMr, nyMr);
+                    case 2
+                        [kk, ii] = meshgrid(1:nzMr, 1:nxMr);
+                        jj = repmat(sliceIdx, nxMr, nzMr);
+                    case 3
+                        [kk, jj] = meshgrid(1:nzMr, 1:nyMr);
+                        ii = repmat(sliceIdx, nyMr, nzMr);
+                end
+                sz_out = size(ii);  N = numel(ii);
+                mr_h = [ii(:), jj(:), kk(:), ones(N,1)];
+                ct_h = mr_h * M;
+                ctSlice = reshape(interp3(ctVol, ct_h(:,2), ct_h(:,1), ct_h(:,3), ...
+                    'linear', NaN), sz_out);
+            end
+
+            function rgb = makeOverlay(mrSlice, ctSlice)
+                mr_lo = mrWL - mrWW/2;  mr_hi = mrWL + mrWW/2;
+                ct_lo = ctWL - ctWW/2;  ct_hi = ctWL + ctWW/2;
+                mr_n  = min(max((mrSlice - mr_lo)/(mr_hi - mr_lo), 0), 1);
+                mr_rgb = repmat(mr_n, 1, 1, 3);
+                if isempty(ctSlice) || all(isnan(ctSlice(:))), rgb = mr_rgb; return; end
+                ct_n  = min(max((ctSlice - ct_lo)/(ct_hi - ct_lo), 0), 1);
+                hmap  = hot(256);
+                idx   = max(1, min(256, floor(ct_n*255)+1));
+                ct_rgb = cat(3, reshape(hmap(idx(:),1),size(ct_n)), ...
+                                reshape(hmap(idx(:),2),size(ct_n)), ...
+                                reshape(hmap(idx(:),3),size(ct_n)));
+                a  = ctAlpha * sqrt(ct_n) .* double(~isnan(ctSlice));
+                a3 = repmat(a, 1, 1, 3);
+                rgb = min(max((1-a3).*mr_rgb + a3.*ct_rgb, 0), 1);
+            end
+
+            function refreshAll()
+                if ~ishandle(fig), return; end
+                % Axial
+                sl_mr  = mrVol(:,:,curVox(3))';
+                ct_raw = sampleCTslice(1, curVox(3))';
+                if ax_yFlip, sl_mr = flipud(sl_mr); ct_raw = flipud(ct_raw); end
+                if isempty(hImAx) || ~ishandle(hImAx)
+                    hImAx = image(axAx, makeOverlay(sl_mr, ct_raw));
+                    axis(axAx,'normal');
+                    set(axAx,'XLim',[0.5 nxMr+0.5],'YLim',[0.5 nyMr+0.5],'YDir','normal', ...
+                        'DataAspectRatio',[pdMr(1) pdMr(2) 1]);
+                    if ax_xFlip, set(axAx,'XDir','reverse'); end
+                    addOrientLabels(axAx,'R','L','A','P');
+                else
+                    set(hImAx,'CData', makeOverlay(sl_mr, ct_raw));
+                end
+                set(hTitleAx,'String',sprintf('AXIAL  z=%d/%d',curVox(3),nzMr));
+                % Coronal
+                sl_mr  = squeeze(mrVol(:,curVox(2),:))';
+                ct_raw = sampleCTslice(2, curVox(2))';
+                if cor_yTop, sl_mr = flipud(sl_mr); ct_raw = flipud(ct_raw); end
+                if isempty(hImCor) || ~ishandle(hImCor)
+                    hImCor = image(axCor, makeOverlay(sl_mr, ct_raw));
+                    axis(axCor,'normal');
+                    set(axCor,'XLim',[0.5 nxMr+0.5],'YLim',[0.5 nzMr+0.5],'YDir','normal', ...
+                        'DataAspectRatio',[pdMr(1) pdMr(3) 1]);
+                    if cor_xFlip, set(axCor,'XDir','reverse'); end
+                    addOrientLabels(axCor,'R','L','S','I');
+                else
+                    set(hImCor,'CData', makeOverlay(sl_mr, ct_raw));
+                end
+                set(hTitleCor,'String',sprintf('CORONAL  y=%d/%d',curVox(2),nyMr));
+                % Sagittal
+                sl_mr  = squeeze(mrVol(curVox(1),:,:))';
+                ct_raw = sampleCTslice(3, curVox(1))';
+                if cor_yTop, sl_mr = flipud(sl_mr); ct_raw = flipud(ct_raw); end
+                if isempty(hImSag) || ~ishandle(hImSag)
+                    hImSag = image(axSag, makeOverlay(sl_mr, ct_raw));
+                    axis(axSag,'normal');
+                    set(axSag,'XLim',[0.5 nyMr+0.5],'YLim',[0.5 nzMr+0.5],'YDir','normal', ...
+                        'DataAspectRatio',[pdMr(2) pdMr(3) 1]);
+                    if sag_xFlip, set(axSag,'XDir','reverse'); end
+                    addOrientLabels(axSag,'P','A','S','I');
+                else
+                    set(hImSag,'CData', makeOverlay(sl_mr, ct_raw));
+                end
+                set(hTitleSag,'String',sprintf('SAGITTAL  x=%d/%d',curVox(1),nxMr));
+                refreshCrosshairs();
+                updateReadouts();
+                if ishandle(hSlAx),  set(hSlAx,  'Value', curVox(3)); end
+                if ishandle(hSlCor), set(hSlCor, 'Value', curVox(2)); end
+                if ishandle(hSlSag), set(hSlSag, 'Value', curVox(1)); end
+            end
+
+            function refreshCrosshairs()
+                if ~ishandle(fig), return; end
+                xhColor = [0.3 1.0 0.3];  lw = 0.8;
+                iy_ax  = electrodeLocalizer.ternary(ax_yFlip,  nyMr-curVox(2)+1, curVox(2));
+                iz_cor = electrodeLocalizer.ternary(cor_yTop, nzMr-curVox(3)+1, curVox(3));
+                if ~isempty(hXHax)  && all(ishandle(hXHax)),  delete(hXHax);  end
+                if ~isempty(hXHcor) && all(ishandle(hXHcor)), delete(hXHcor); end
+                if ~isempty(hXHsag) && all(ishandle(hXHsag)), delete(hXHsag); end
+                hXHax(1)  = plot(axAx, [curVox(1) curVox(1)],[0.5 nyMr+0.5], 'Color',xhColor,'LineWidth',lw,'HitTest','off');
+                hXHax(2)  = plot(axAx, [0.5 nxMr+0.5],[iy_ax iy_ax],         'Color',xhColor,'LineWidth',lw,'HitTest','off');
+                hXHcor(1) = plot(axCor,[curVox(1) curVox(1)],[0.5 nzMr+0.5], 'Color',xhColor,'LineWidth',lw,'HitTest','off');
+                hXHcor(2) = plot(axCor,[0.5 nxMr+0.5],[iz_cor iz_cor],        'Color',xhColor,'LineWidth',lw,'HitTest','off');
+                hXHsag(1) = plot(axSag,[curVox(2) curVox(2)],[0.5 nzMr+0.5], 'Color',xhColor,'LineWidth',lw,'HitTest','off');
+                hXHsag(2) = plot(axSag,[0.5 nyMr+0.5],[iz_cor iz_cor],        'Color',xhColor,'LineWidth',lw,'HitTest','off');
+            end
+
+            function updateReadouts()
+                vals = {tx,ty,tz,rx,ry,rz,sc};
+                fmts = {'%.1f','%.1f','%.1f','%.1f','%.1f','%.1f','%.4f'};
+                for jj = 1:7
+                    set(hReadout(jj),'String',sprintf(fmts{jj}, vals{jj}));
+                end
+                set(hStatus,'String',sprintf( ...
+                    '  T=[%.1f, %.1f, %.1f] mm   R=[%.1f, %.1f, %.1f]°   scale=%.4f', ...
+                    tx,ty,tz,rx,ry,rz,sc));
+            end
+
+            function cbDown(~,~)
+                ax = axUnderCursor();
+                if isempty(ax), return; end
+                isDragging = false;  dragFigStart = get(fig,'CurrentPoint');
+                dragAxSel  = ax;     dragState0   = [tx ty tz rx ry rz sc];
+            end
+
+            function cbMotion(~,~)
+                if isempty(dragFigStart), return; end
+                delta = get(fig,'CurrentPoint') - dragFigStart;
+                if ~isDragging && norm(delta) < 3, return; end
+                isDragging = true;
+                fine = any(strcmp(get(fig,'CurrentModifier'),'shift'));
+                k    = electrodeLocalizer.ternary(fine, 0.1, 1.0);
+                dx   = delta(1);  dy = delta(2);
+                xSignAx = -1;  xSignSag = 1;
+                ax = dragAxSel;
+                switch mode_
+                    case 'translate'
+                        s = k*SENS_TR;
+                        if     ax==axAx,  tx=dragState0(1)+dx*s*xSignAx;  ty=dragState0(2)+dy*s;
+                        elseif ax==axCor, tx=dragState0(1)+dx*s*xSignAx;  tz=dragState0(3)+dy*s;
+                        elseif ax==axSag, ty=dragState0(2)+dx*s*xSignSag; tz=dragState0(3)+dy*s;
+                        end
+                    case 'rotate'
+                        s = k*SENS_ROT;
+                        if     ax==axAx,  rz=dragState0(6)+dx*s*(-xSignAx);
+                        elseif ax==axCor, ry=dragState0(5)+dx*s*xSignAx;
+                        elseif ax==axSag, rx=dragState0(4)+dx*s*(-xSignSag);
+                        end
+                    case 'scale'
+                        sc = max(0.1, dragState0(7)+dx*k*SENS_SC);
+                end
+                refreshAll();
+            end
+
+            function cbUp(~,~)
+                if ~isDragging && ~isempty(dragFigStart) && ~isempty(dragAxSel)
+                    ax = dragAxSel;
+                    cp = get(ax,'CurrentPoint');
+                    xd = round(cp(1,1));  yd = round(cp(1,2));
+                    if ax==axAx
+                        curVox(1) = max(1,min(nxMr,xd));
+                        curVox(2) = electrodeLocalizer.ternary(ax_yFlip, nyMr-max(1,min(nyMr,yd))+1, max(1,min(nyMr,yd)));
+                    elseif ax==axCor
+                        curVox(1) = max(1,min(nxMr,xd));
+                        curVox(3) = electrodeLocalizer.ternary(cor_yTop, nzMr-max(1,min(nzMr,yd))+1, max(1,min(nzMr,yd)));
+                    elseif ax==axSag
+                        curVox(2) = max(1,min(nyMr,xd));
+                        curVox(3) = electrodeLocalizer.ternary(cor_yTop, nzMr-max(1,min(nzMr,yd))+1, max(1,min(nzMr,yd)));
+                    end
+                    refreshAll();
+                end
+                isDragging=false; dragFigStart=[]; dragAxSel=[]; dragState0=[];
+            end
+
+            function cbScroll(~,evt)
+                ax = axUnderCursor();  d = evt.VerticalScrollCount;
+                if     ax==axAx,  curVox(3)=max(1,min(nzMr,curVox(3)-d));
+                elseif ax==axCor, curVox(2)=max(1,min(nyMr,curVox(2)-d));
+                elseif ax==axSag, curVox(1)=max(1,min(nxMr,curVox(1)-d));
+                end
+                refreshAll();
+            end
+
+            function cbKey(~,evt)
+                switch evt.Key
+                    case 'uparrow',   curVox(3)=min(nzMr,curVox(3)+1); refreshAll();
+                    case 'downarrow', curVox(3)=max(1,   curVox(3)-1); refreshAll();
+                end
+            end
+
+            function setMode_(m)
+                mode_ = m;
+                set(btnTr,  'Value',strcmp(m,'translate'), 'BackgroundColor', ...
+                    electrodeLocalizer.ternary(strcmp(m,'translate'),[0.25 0.55 0.25],bg2));
+                set(btnRot, 'Value',strcmp(m,'rotate'),    'BackgroundColor', ...
+                    electrodeLocalizer.ternary(strcmp(m,'rotate'),   [0.25 0.55 0.25],bg2));
+                set(btnSc,  'Value',strcmp(m,'scale'),     'BackgroundColor', ...
+                    electrodeLocalizer.ternary(strcmp(m,'scale'),    [0.25 0.55 0.25],bg2));
+            end
+
+            function cbWL(~,~)
+                mrWW=str2double(get(hMrW,'String')); mrWL=str2double(get(hMrL,'String'));
+                ctWW=str2double(get(hCtW,'String')); ctWL=str2double(get(hCtL,'String'));
+                refreshAll();
+            end
+
+            function cbAlpha(~,~),     ctAlpha=get(hAlphaSlider,'Value'); refreshAll(); end
+            function cbAlphaLive(),    ctAlpha=get(hAlphaSlider,'Value'); refreshAll(); end
+
+            function cbEditParam(idx, val)
+                if isnan(val), return; end
+                switch idx
+                    case 1,tx=val; case 2,ty=val; case 3,tz=val;
+                    case 4,rx=val; case 5,ry=val; case 6,rz=val;
+                    case 7,sc=max(0.1,val);
+                end
+                refreshAll();
+            end
+
+            function cbSlider(dim)
+                switch dim
+                    case 1, curVox(3)=round(get(hSlAx, 'Value'));
+                    case 2, curVox(2)=round(get(hSlCor,'Value'));
+                    case 3, curVox(1)=round(get(hSlSag,'Value'));
+                end
+                refreshAll();
+            end
+
+            function cbReset(~,~),  tx=0;ty=0;tz=0;rx=0;ry=0;rz=0;sc=1; refreshAll(); end
+
+            function cbAlignCenters(~,~)
+                mrCtr = [round(nxMr/2),round(nyMr/2),round(nzMr/2),1]*Tmr;
+                tx=mrCtr(1)-ctCtrWorld(1); ty=mrCtr(2)-ctCtrWorld(2); tz=mrCtr(3)-ctCtrWorld(3);
+                refreshAll();
+            end
+
+            function cbSave(~,~)
+                set(hStatus,'String','  Resampling CT onto MRI grid...'); drawnow;
+                M  = buildSamplingMatrix();
+                [ii,jj,kk] = ndgrid(1:nxMr,1:nyMr,1:nzMr);  N = numel(ii);
+                ct_h = [ii(:),jj(:),kk(:),ones(N,1)] * M;
+                ctRs = reshape(interp3(ctVol,ct_h(:,2),ct_h(:,1),ct_h(:,3),'linear',0), ...
+                    nxMr,nyMr,nzMr);
+                outPath = fullfile(outputDir,'ct_manual_coreg.nii');
+                outInfo = mrInfo;  outInfo.Datatype='single';  outInfo.BitsPerPixel=32;
+                niftiwrite(single(ctRs), outPath, outInfo, 'Compressed', false);
+                ctCoregNii = outPath;
+                fprintf('[ctMrRegistrationGUI] Saved: %s\n', outPath);
+                uiresume(fig); delete(fig);
+            end
+
+            function cbClose(~,~)
+                ctCoregNii = '';
+                if ishandle(fig), uiresume(fig); delete(fig); end
+            end
+
+            function ax = axUnderCursor()
+                ax = [];
+                fp  = get(fig,'CurrentPoint');  fsz = get(fig,'Position');
+                np  = fp ./ fsz(3:4);
+                for aa = [axAx axCor axSag]
+                    apos = get(aa,'Position');
+                    if np(1)>=apos(1) && np(1)<=apos(1)+apos(3) && ...
+                       np(2)>=apos(2) && np(2)<=apos(2)+apos(4)
+                        ax = aa; return;
+                    end
+                end
+            end
+
+            function addOrientLabels(ax, xl, xr, yt, yb)
+                xl_ = get(ax,'XLim');  yl_ = get(ax,'YLim');
+                mx = mean(xl_);  my = mean(yl_);
+                text(ax,xl_(1)+0.01*(xl_(2)-xl_(1)),my,xl,'Color',[1 0.8 0],'FontSize',8, ...
+                    'HorizontalAlignment','left','VerticalAlignment','middle','HitTest','off');
+                text(ax,xl_(2)-0.01*(xl_(2)-xl_(1)),my,xr,'Color',[1 0.8 0],'FontSize',8, ...
+                    'HorizontalAlignment','right','VerticalAlignment','middle','HitTest','off');
+                text(ax,mx,yl_(2)-0.01*(yl_(2)-yl_(1)),yt,'Color',[1 0.8 0],'FontSize',8, ...
+                    'HorizontalAlignment','center','VerticalAlignment','top','HitTest','off');
+                text(ax,mx,yl_(1)+0.01*(yl_(2)-yl_(1)),yb,'Color',[1 0.8 0],'FontSize',8, ...
+                    'HorizontalAlignment','center','VerticalAlignment','bottom','HitTest','off');
+            end
+
+        end % ctMrRegistrationGUI
 
     end % methods (Access = private)
 
