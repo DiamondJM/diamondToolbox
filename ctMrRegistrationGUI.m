@@ -219,10 +219,11 @@ for ii = 1:7
         'Units','normalized','Position',[rp yy 0.095 0.038], ...
         'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10, ...
         'HorizontalAlignment','right');
-    hReadout(ii) = uicontrol(fig,'Style','text','String','0.0', ...
+    hReadout(ii) = uicontrol(fig,'Style','edit','String','0.0', ...
         'Units','normalized','Position',[rp+0.100 yy 0.080 0.038], ...
         'BackgroundColor',bg2,'ForegroundColor',[0.3 0.9 0.3],'FontSize',10, ...
-        'HorizontalAlignment','center');
+        'HorizontalAlignment','center', ...
+        'Callback',@(h,~) cbEditParam(ii, str2double(get(h,'String'))));
 end
 
 uicontrol(fig,'Style','pushbutton','String','Align Centers', ...
@@ -579,6 +580,20 @@ uiwait(fig);
         refreshAll();
     end
 
+    function cbEditParam(idx, val)
+        if isnan(val), return; end
+        switch idx
+            case 1, tx = val;
+            case 2, ty = val;
+            case 3, tz = val;
+            case 4, rx = val;
+            case 5, ry = val;
+            case 6, rz = val;
+            case 7, sc = max(0.1, val);
+        end
+        refreshAll();
+    end
+
     function cbSlider(dim)
         % dim: 1=axial(z), 2=coronal(y), 3=sagittal(x)
         switch dim
@@ -617,7 +632,9 @@ uiwait(fig);
             'linear', 0), nxMr, nyMr, nzMr);
 
         outPath  = fullfile(outputDir, 'ct_manual_coreg.nii');
-        outInfo  = mrInfo;   % same grid as MRI
+        outInfo          = mrInfo;      % same grid as MRI
+        outInfo.Datatype = 'single';   % match the single() cast below
+        outInfo.BitsPerPixel = 32;
         niftiwrite(single(ctRs), outPath, outInfo, 'Compressed', false);
 
         ctCoregNii = outPath;
