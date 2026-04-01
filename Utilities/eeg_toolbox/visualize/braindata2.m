@@ -279,9 +279,7 @@ classdef braindata2 < handle
                 bd.roi.roic_lead_bipo = data.(char(fieldnames(data)));
             end
 
-            % localizer_rois(bd.subj,bd.rootEEGdir,1);
-            % Are you running this internal to the Zaghloul lab? If so,
-            % uncomment the code above. 
+            localizer_rois(bd.subj,bd.rootEEGdir,1);
             
             if isfield(bd.filepaths, 'roic_roi_lh') && exist(bd.filepaths.roic_roi_lh, 'file')
                 bd.roi.roic_roi_lh = readtableSafe(bd.filepaths.roic_roi_lh);
