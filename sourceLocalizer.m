@@ -1802,21 +1802,32 @@ classdef sourceLocalizer < handle
         end
 
         function downsampleTs(self, varargin)
-        % DOWNSAMPLETS  Downsample timeSeries in-place.
+        % DOWNSAMPLETS  Downsample, artifact-reject, and baseline-correct timeSeries in-place.
         %
         % Usage:
         %   sl.downsampleTs()
-        %   sl.downsampleTs('targetFs', 10)
+        %   sl.downsampleTs('targetFs', 10, 'zThresh', 10, 'medFiltMin', 30)
+        %
+        % Steps (in order):
+        %   1. Resample to targetFs
+        %   2. Linearly interpolate samples where |z-score| > zThresh
+        %   3. Subtract per-channel moving median to remove slow baseline drift
         %
         % Overwrites sl.timeSeries and updates sl.Fs.
         %
         % Parameters:
-        %   targetFs  - target sample rate in Hz (default 10)
+        %   targetFs    - target sample rate in Hz        (default 10)
+        %   zThresh     - artifact z-score threshold      (default 10; [] = skip)
+        %   medFiltMin  - median filter window in minutes (default 30; [] = skip)
 
             p = inputParser;
-            addParameter(p, 'targetFs', 10);
+            addParameter(p, 'targetFs',   10);
+            addParameter(p, 'zThresh',    10);
+            addParameter(p, 'medFiltMin', 30);
             parse(p, varargin{:});
-            targetFs = p.Results.targetFs;
+            targetFs   = p.Results.targetFs;
+            zThresh    = p.Results.zThresh;
+            medFiltMin = p.Results.medFiltMin;
 
             assert(~isempty(self.timeSeries), ...
                 '[downsampleTs] timeSeries is empty — load data first.');
@@ -1825,12 +1836,37 @@ classdef sourceLocalizer < handle
             assert(targetFs < self.Fs, ...
                 '[downsampleTs] targetFs (%.4g) must be less than current Fs (%.4g).', targetFs, self.Fs);
 
+            % 1. Downsample
             [p_r, q_r] = rat(targetFs / self.Fs);
             ts = resample(double(self.timeSeries), p_r, q_r);
             Fs = self.Fs * p_r / q_r;
-
             fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
                 self.Fs, Fs, size(ts, 1));
+
+            % 2. Artifact rejection: interpolate samples exceeding z-score threshold
+            if ~isempty(zThresh)
+                bad  = abs(zscore(ts)) > zThresh;
+                nBad = sum(bad(:));
+                if nBad > 0
+                    fprintf('[downsampleTs] Interpolating %d artifact sample(s) (|z| > %g).\n', nBad, zThresh);
+                    t = (1:size(ts,1))';
+                    for c = 1:size(ts,2)
+                        m = bad(:,c);
+                        if any(m) && ~all(m)
+                            ts(m,c) = interp1(t(~m), ts(~m,c), t(m), 'linear', 'extrap');
+                        end
+                    end
+                end
+            end
+
+            % 3. Median filter baseline removal
+            if ~isempty(medFiltMin)
+                winSamp = 2*floor(medFiltMin * 60 * Fs / 2) + 1;  % must be odd
+                fprintf('[downsampleTs] Removing baseline with %.0f-min median filter.\n', medFiltMin);
+                for c = 1:size(ts,2)
+                    ts(:,c) = ts(:,c) - medfilt1(ts(:,c), winSamp);
+                end
+            end
 
             self.timeSeries = ts;
             self.Fs = Fs;
