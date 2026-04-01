@@ -45,8 +45,6 @@ classdef electrodeLocalizer < handle
 
         locDirs         % struct of directory paths (from localizer_create_directories)
 
-        strokeMode      % logical: if true, use CT→post-op MRI→pre-op MRI registration chain
-
         % Detected electrode clusters (set by detectElectrodes)
         clusters        % [N x 3] centroid coordinates in MR mm space
 
@@ -103,12 +101,10 @@ classdef electrodeLocalizer < handle
             addParameter(p, 'forceNew',       false);
             addParameter(p, 'freesurfer_bin', electrodeLocalizer.defaultFsBin());
             addParameter(p, 'afni_bin',       electrodeLocalizer.AFNI_BIN_DEFAULT);
-            addParameter(p, 'strokeMode',     false);
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
             self.fsBin      = p.Results.freesurfer_bin;
             self.afniBin    = p.Results.afni_bin;
-            self.strokeMode = p.Results.strokeMode;
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
@@ -197,9 +193,6 @@ classdef electrodeLocalizer < handle
             self.runSurface();           % never force — recon-all takes hours
             self.runSuma();              % never force — SUMA takes minutes
             self.coregisterCT('forceNew', forceNew);
-            if self.strokeMode
-                self.coregisterPostopMRI('forceNew', forceNew);
-            end
             if isempty(self.chanNames)
                 self.chanNames = sourceLocalizer.loadChanNamesFromFile();
             end
@@ -451,29 +444,6 @@ classdef electrodeLocalizer < handle
                 fprintf('[Stage 2] MRI already present: %s\n', mrDest);
             end
 
-            % Post-op MRI (stroke mode only)
-            if self.strokeMode
-                mrPostDest = fullfile(self.locDirs.mr_post, 'mr_post.nii');
-                if exist(mrPostDest, 'file') ~= 2
-                    while true
-                        choice = dlgNonModal( ...
-                            {'Select the POST-operative MRI for this subject.', ...
-                             'Used as an intermediate registration target to account', ...
-                             'for brain shift after hemicraniectomy.', ...
-                             '', 'Accepted formats:  .nii  |  .nii.gz  |  .mgz'}, ...
-                            'Post-op MRI', 'Browse...', 'Cancel');
-                        if ~strcmp(choice, 'Browse...')
-                            error('[electrodeLocalizer] Post-op MRI is required in stroke mode.');
-                        end
-                        [f, d] = uigetfile(filter, 'Select post-op MRI');
-                        if ~isequal(f, 0), break; end
-                    end
-                    self.convertToNii(fullfile(d, f), mrPostDest);
-                else
-                    fprintf('[Stage 2] Post-op MRI already present: %s\n', mrPostDest);
-                end
-            end
-
             % CT
             if exist(ctDest, 'file') ~= 2
                 while true
@@ -638,17 +608,24 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function coregisterCT(self, varargin)
-            % Rigid-body coregistration of post-op CT to pre-op MRI using
-            % AFNI align.sh (@Align_Centers initialisation).
-            % Saves the path to the .aff12.1D combined transform to
-            % zloc/CT_1/transform/transform.mat.
+            % CT-to-MR coregistration.
+            % Default method is 'manual': launches FreeView for user to align CT to MRI.
+            % Use 'method','auto' for automatic AFNI alignment.
+            % Saves result to zloc/CT_1/transform/transform.mat.
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'cost', 'lpc');   % alignment cost function (lpc, nmi, lpa, etc.)
+            addParameter(p, 'method',   'manual');  % 'manual' or 'auto'
+            addParameter(p, 'cost', 'lpc');          % auto only: alignment cost function
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
+            method   = p.Results.method;
             cost     = p.Results.cost;
+
+            if strcmp(method, 'manual')
+                self.manualCoregisterCT('forceNew', forceNew);
+                return;
+            end
 
             xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             if exist(xfmFile, 'file') == 2 && ~forceNew
@@ -666,18 +643,11 @@ classdef electrodeLocalizer < handle
 
             fprintf('[Stage 5] Coregistering CT to MR via AFNI align.sh...\n');
 
-            ctNii = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
+            ctNii      = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
+            mrNii      = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            mrWorkName = 'mr_pre.nii';
             assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s', ctNii);
-            if self.strokeMode
-                mrNii      = fullfile(self.locDirs.mr_post, 'mr_post.nii');
-                mrWorkName = 'mr_post.nii';
-                assert(exist(mrNii,'file')==2, ...
-                    '[electrodeLocalizer] Post-op MRI not found: %s\nRun getInputFiles first.', mrNii);
-            else
-                mrNii      = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
-                mrWorkName = 'mr_pre.nii';
-                assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
-            end
+            assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
 
             alignScript = fullfile(fileparts(mfilename('fullpath')), ...
                 'Utilities', 'eeg_toolbox', 'localize', 'zLocalize', ...
@@ -792,124 +762,83 @@ classdef electrodeLocalizer < handle
 
 
         % -----------------------------------------------------------------
-        %% Stage 5b — post-op MRI to pre-op MRI coregistration (stroke only)
+        %% Stage 5 (manual) — FreeView-based manual CT-to-MR coregistration
         % -----------------------------------------------------------------
 
-        function coregisterPostopMRI(self, varargin)
-            % Rigid-body coregistration of post-op MRI to pre-op MRI using
-            % AFNI align.sh. A brain mask (3dSkullStrip) is applied to the
-            % post-op MRI before registration to reduce the influence of the
-            % hemicraniectomy defect edges and herniated tissue.
-            % Transform saved to zloc/mr_post/transform/transform.mat.
+        function manualCoregisterCT(self, varargin)
+            % Launch FreeView for the user to manually align the CT to the MRI.
+            % The user should use Tools > Transform Volume in FreeView to align
+            % the CT, then File > Save Volume As to save the registered CT as:
+            %   <transform_dir>/ct_manual_coreg.nii
+            % MATLAB waits for confirmation, then stores the path in transform.mat.
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
 
-            xfmFile = fullfile(self.locDirs.mr_post_xfm, 'transform.mat');
+            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
             if exist(xfmFile, 'file') == 2 && ~forceNew
-                fprintf('[Stage 5b] Post-op MRI → pre-op MRI transform already exists; skipping.\n');
-                return;
-            end
-
-            fprintf('[Stage 5b] Coregistering post-op MRI to pre-op MRI via AFNI...\n');
-
-            mrPreNii  = fullfile(self.locDirs.mr_pre,  'mr_pre.nii');
-            mrPostNii = fullfile(self.locDirs.mr_post, 'mr_post.nii');
-            assert(exist(mrPreNii, 'file')==2, ...
-                '[electrodeLocalizer] Pre-op MRI not found: %s',  mrPreNii);
-            assert(exist(mrPostNii,'file')==2, ...
-                '[electrodeLocalizer] Post-op MRI not found: %s', mrPostNii);
-
-            alignScript = fullfile(fileparts(mfilename('fullpath')), ...
-                'Utilities', 'eeg_toolbox', 'localize', 'zLocalize', ...
-                'shell_scripts', 'align.sh');
-            assert(exist(alignScript,'file')==2, ...
-                '[electrodeLocalizer] align.sh not found at: %s', alignScript);
-
-            workDir = self.locDirs.mr_post_xfm;
-            setenv('PATH', [getenv('PATH') ':' self.afniBin]);
-
-            % Reorient both volumes to RAI.
-            mrPreWork  = fullfile(workDir, 'mr_pre.nii');
-            mrPostWork = fullfile(workDir, 'mr_post.nii');
-            if exist(mrPreWork,'file') ~= 2
-                cmd = sprintf('"%s" -orient RAI -inset "%s" -prefix "%s" -overwrite', ...
-                    fullfile(self.afniBin,'3dresample'), mrPreNii, mrPreWork);
-                [cst,~] = unix(cmd);
-                if cst ~= 0, copyfile(mrPreNii, mrPreWork); end
-            end
-            if exist(mrPostWork,'file') ~= 2
-                cmd = sprintf('"%s" -orient RAI -inset "%s" -prefix "%s" -overwrite', ...
-                    fullfile(self.afniBin,'3dresample'), mrPostNii, mrPostWork);
-                [cst,~] = unix(cmd);
-                if cst ~= 0, copyfile(mrPostNii, mrPostWork); end
-            end
-
-            % Brain mask on post-op MRI to reduce hemicraniectomy defect
-            % influence on the registration cost function.
-            mrPostBrain = fullfile(workDir, 'mr_post_brain.nii');
-            if exist(mrPostBrain,'file') ~= 2
-                fprintf('[Stage 5b] Skull-stripping post-op MRI for brain mask...\n');
-                cmd = sprintf('"%s/3dSkullStrip" -input "%s" -prefix "%s" -overwrite 2>/dev/null', ...
-                    self.afniBin, mrPostWork, mrPostBrain);
-                [cst, ctx] = unix(cmd);
-                if cst ~= 0
-                    fprintf('[Stage 5b] 3dSkullStrip failed; using unmasked post-op MRI.\n%s\n', ctx);
-                    copyfile(mrPostWork, mrPostBrain);
+                S_chk = load(xfmFile);
+                if isfield(S_chk, 'manual') && S_chk.manual && ...
+                        isfield(S_chk, 'ctCoregNii') && exist(S_chk.ctCoregNii, 'file') == 2
+                    fprintf('[Stage 5] Manual CT-MR registration already exists; skipping.\n');
+                    return;
                 end
             end
 
-            hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
-            if isempty(hits)
-                % Clean stale intermediates.
-                stale = [dir(fullfile(workDir, 'mr_pre_do*')); ...
-                         dir(fullfile(workDir, 'mr_post_brain_shft*')); ...
-                         dir(fullfile(workDir, 'mr_post_brain_sh2*')); ...
-                         dir(fullfile(workDir, '__tt_*')); ...
-                         dir(fullfile(workDir, '*_mat.aff12.1D'))];
-                for si = 1:numel(stale)
-                    delete(fullfile(stale(si).folder, stale(si).name));
-                end
+            ctNii = fullfile(self.locDirs.ct_1, 'ct_implant.nii');
+            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            assert(exist(ctNii,'file')==2, '[electrodeLocalizer] CT not found: %s', ctNii);
+            assert(exist(mrNii,'file')==2, '[electrodeLocalizer] MRI not found: %s', mrNii);
 
-                logFile = fullfile(workDir, 'align_log.txt');
-                unix(sprintf('bash "%s" mr_pre mr_post_brain "%s" > "%s" 2>&1 &', ...
-                    alignScript, workDir, logFile));
+            workDir    = self.locDirs.ct_1_xfm;
+            ctWork     = fullfile(workDir, 'ct_implant.nii');
+            mrWork     = fullfile(workDir, 'mr_pre.nii');
+            ctCoregNii = fullfile(workDir, 'ct_manual_coreg.nii');
 
-                fprintf('[Stage 5b] Running align_epi_anat.py for MRI→MRI (polling every 15 s) .');
-                t0 = tic; timeout = 3600;
-                xfmAf = []; xfmShft = fullfile(workDir, 'mr_post_brain_shft.1D');
-                while toc(t0) < timeout
-                    xfmAf = dir(fullfile(workDir, '*_XFMTO_lpc_*_mat.aff12.1D'));
-                    if ~isempty(xfmAf) && exist(xfmShft,'file') == 2, break; end
-                    pause(15); fprintf('.');
-                end
-                fprintf(' (%.0f min)\n', toc(t0)/60);
-
-                unix('pkill -f "3dNotes" 2>/dev/null; pkill -f "align_epi_anat" 2>/dev/null');
-
-                hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
-                if isempty(hits) && ~isempty(xfmAf) && exist(xfmShft,'file') == 2
-                    xfmAfPath   = fullfile(workDir, xfmAf(1).name);
-                    xfmFullPath = fullfile(workDir, ['full_' xfmAf(1).name]);
-                    catCmd = sprintf('cat_matvec -ONELINE "%s" "%s" > "%s"', ...
-                        xfmAfPath, xfmShft, xfmFullPath);
-                    [cst, ctx] = unix(catCmd);
-                    if cst ~= 0, fprintf('%s\n', ctx); end
-                    hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
-                end
-
-                assert(~isempty(hits), ...
-                    '[Stage 5b] MRI-MRI alignment did not produce a .aff12.1D transform.\n  workDir: %s', workDir);
-            else
-                fprintf('[Stage 5b] Existing MRI-MRI transform found; skipping align.sh.\n');
+            if exist(ctWork, 'file') ~= 2, copyfile(ctNii, ctWork); end
+            if exist(mrWork, 'file') ~= 2
+                fprintf('[Stage 5] Resampling MR to RAI orientation...\n');
+                cmd = sprintf('"%s/3dresample" -orient RAI -inset "%s" -prefix "%s" -overwrite', ...
+                    self.afniBin, mrNii, mrWork);
+                [cst, ~] = unix(cmd);
+                if cst ~= 0, copyfile(mrNii, mrWork); end
             end
 
-            aff1D = fullfile(workDir, hits(1).name);
-            fprintf('[Stage 5b] Using MRI-MRI transform: %s\n', hits(1).name);
-            save(xfmFile, 'aff1D');
-            fprintf('[Stage 5b] Transform path saved to %s\n', xfmFile);
+            % Launch FreeView
+            fvBin = fullfile(self.fsBin, 'freeview');
+            if exist(fvBin, 'file') ~= 2
+                fvBin = '/Applications/freesurfer/8.1.0/bin/freeview';
+            end
+            assert(exist(fvBin,'file')==2, ...
+                '[manualCoregisterCT] FreeView not found at: %s', fvBin);
+
+            fprintf('[Stage 5] Launching FreeView for manual CT-MR registration...\n');
+            unix(sprintf('"%s" -v "%s" -v "%s:colormap=heat:opacity=0.5" &', ...
+                fvBin, mrWork, ctWork));
+
+            % Wait for user
+            msg = { ...
+                'FreeView is open with the MRI (background) and CT (heat overlay).', ...
+                '', ...
+                'To align the CT to the MRI:', ...
+                '  1. Click on the CT volume in the Volumes panel', ...
+                '  2. Go to Tools > Transform Volume', ...
+                '  3. Use the sliders to align CT skull to MRI skull', ...
+                '  4. When aligned, go to File > Save Volume As...', ...
+                sprintf('  5. Save as:  ct_manual_coreg.nii'), ...
+                sprintf('     in folder: %s', workDir), ...
+                '', ...
+                'Click OK when you have saved the file.'};
+            uiwait(msgbox(msg, 'Manual CT-MR Coregistration', 'help', 'modal'));
+
+            assert(exist(ctCoregNii,'file')==2, ...
+                '[manualCoregisterCT] ct_manual_coreg.nii not found in:\n  %s\nRe-run and save the file.', workDir);
+
+            manual = true;  %#ok<NASGU>
+            save(xfmFile, 'manual', 'ctCoregNii');
+            fprintf('[Stage 5] Manual coregistration saved: %s\n', ctCoregNii);
         end
 
         % -----------------------------------------------------------------
@@ -942,48 +871,47 @@ classdef electrodeLocalizer < handle
 
             fprintf('[Stage 6] Detecting electrode clusters via AFNI 3dclust...\n');
 
-            % Load the AFNI transform path saved by coregisterCT
-            xfmFile = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
+            % Load coregistration result
+            workDir = self.locDirs.ct_1_xfm;
+            xfmFile = fullfile(workDir, 'transform.mat');
             assert(exist(xfmFile, 'file') == 2, ...
                 '[electrodeLocalizer] Run coregisterCT before detectElectrodes.');
-            S = load(xfmFile, 'aff1D');
-            aff1D = S.aff1D;
+            S_xfm = load(xfmFile);
 
-            % Verify the .aff12.1D file still exists; fall back to glob search
-            if exist(aff1D, 'file') ~= 2
-                hits = dir(fullfile(self.locDirs.ct_1_xfm, 'full_*.aff12.1D'));
-                assert(~isempty(hits), ...
-                    '[Stage 6] AFNI transform (.aff12.1D) not found. Re-run coregisterCT.');
-                aff1D = fullfile(self.locDirs.ct_1_xfm, hits(1).name);
-                fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
-            end
-
-            % Stroke mode: chain CT→post-op MRI and post-op MRI→pre-op MRI
-            % transforms into a single combined .aff12.1D before applying.
-            if self.strokeMode
-                xfmPostFile = fullfile(self.locDirs.mr_post_xfm, 'transform.mat');
-                assert(exist(xfmPostFile,'file')==2, ...
-                    '[Stage 6] Post-op MRI transform not found. Run coregisterPostopMRI first.');
-                S2 = load(xfmPostFile, 'aff1D');
-                aff1D_post = S2.aff1D;
-                combinedXfm = fullfile(self.locDirs.ct_1_xfm, 'full_combined_stroke.aff12.1D');
-                cmd = sprintf('"%s/cat_matvec" -ONELINE "%s" "%s" > "%s"', ...
-                    self.afniBin, aff1D, aff1D_post, combinedXfm);
-                [cst, ctx] = unix(cmd);
-                if cst ~= 0
-                    error('[Stage 6] cat_matvec transform chaining failed:\n%s', ctx);
+            if isfield(S_xfm, 'manual') && S_xfm.manual
+                % Manual coregistration: CT already in MRI space.
+                % Resample to RAI for AFNI clustering, use identity transform.
+                ctCoregNii = S_xfm.ctCoregNii;
+                assert(exist(ctCoregNii,'file')==2, ...
+                    '[Stage 6] ct_manual_coreg.nii not found: %s', ctCoregNii);
+                ctBrik = fullfile(workDir, 'ct_manual_coreg+orig');
+                if ~exist([ctBrik '.BRIK'],'file') && ~exist([ctBrik '.BRIK.gz'],'file')
+                    fprintf('[Stage 6] Converting manual coreg CT to AFNI BRIK...\n');
+                    setenv('PATH', [getenv('PATH') ':' self.afniBin]);
+                    cmd = sprintf('"%s/3dcopy" "%s" "%s"', self.afniBin, ctCoregNii, ctBrik);
+                    unix(cmd);
                 end
-                aff1D = combinedXfm;
-                fprintf('[Stage 6] Stroke mode: chained CT→post-op MRI→pre-op MRI transform.\n');
+                % Write identity aff12.1D (CT already in MRI space)
+                aff1D = fullfile(workDir, 'identity.aff12.1D');
+                fid = fopen(aff1D, 'w');
+                fprintf(fid, ' 1 0 0 0 0 1 0 0 0 0 1 0\n');
+                fclose(fid);
+                fprintf('[Stage 6] Using manual coregistration with identity transform.\n');
+            else
+                % Automatic (AFNI) coregistration
+                aff1D = S_xfm.aff1D;
+                if exist(aff1D, 'file') ~= 2
+                    hits = dir(fullfile(workDir, 'full_*.aff12.1D'));
+                    assert(~isempty(hits), ...
+                        '[Stage 6] AFNI transform (.aff12.1D) not found. Re-run coregisterCT.');
+                    aff1D = fullfile(workDir, hits(1).name);
+                    fprintf('[Stage 6] Using transform: %s\n', hits(1).name);
+                end
+                ctBrik = fullfile(workDir, 'ct_implant+orig');
+                assert(exist([ctBrik '.BRIK'], 'file') == 2 || ...
+                       exist([ctBrik '.BRIK.gz'], 'file') == 2, ...
+                    '[Stage 6] CT BRIK not found: %s.BRIK(.gz)\n  Re-run coregisterCT.', ctBrik);
             end
-
-            % CT BRIK created by align.sh (3dresample -orient RAI).
-            % AFNI writes compressed BRIK.gz by default; check both forms.
-            workDir = self.locDirs.ct_1_xfm;
-            ctBrik  = fullfile(workDir, 'ct_implant+orig');
-            assert(exist([ctBrik '.BRIK'], 'file') == 2 || ...
-                   exist([ctBrik '.BRIK.gz'], 'file') == 2, ...
-                '[Stage 6] CT BRIK not found: %s.BRIK(.gz)\n  Re-run coregisterCT.', ctBrik);
 
             % Ensure AFNI tools are on PATH
             setenv('PATH', [getenv('PATH') ':' self.afniBin]);
@@ -1393,20 +1321,26 @@ classdef electrodeLocalizer < handle
             % names each one, then reviews placements in 3-D.
             % Results stored in self.leads (chanName, x, y, z, type).
 
-            ctFile = fullfile(self.locDirs.ct_1_xfm, 'ct_implant.nii');
-            assert(exist(ctFile,'file')==2, ...
-                '[manualLocalize] Coregistered CT not found: %s\nRun coregisterCT first.', ctFile);
-
-            % Load CT→MR transform (produced by coregisterCT) for coord xfm.
-            xfmFilePath = fullfile(self.locDirs.ct_1_xfm, 'transform.mat');
+            workDir     = self.locDirs.ct_1_xfm;
+            xfmFilePath = fullfile(workDir, 'transform.mat');
             assert(exist(xfmFilePath,'file')==2, ...
                 '[manualLocalize] CT-MR transform not found. Run coregisterCT first.');
-            S_xfm   = load(xfmFilePath, 'aff1D');
-            aff1D   = S_xfm.aff1D;
-            workDir = self.locDirs.ct_1_xfm;
-            ctBrik  = fullfile(workDir, 'ct_implant+orig');
-            assert(exist([ctBrik '.BRIK'],'file')==2 || exist([ctBrik '.BRIK.gz'],'file')==2, ...
-                '[manualLocalize] CT BRIK not found: %s.BRIK(.gz)\nRun coregisterCT first.', ctBrik);
+            S_xfm = load(xfmFilePath);
+
+            isManualCoreg = isfield(S_xfm, 'manual') && S_xfm.manual;
+            if isManualCoreg
+                ctFile = S_xfm.ctCoregNii;
+                assert(exist(ctFile,'file')==2, ...
+                    '[manualLocalize] ct_manual_coreg.nii not found: %s\nRe-run manualCoregisterCT.', ctFile);
+            else
+                ctFile = fullfile(workDir, 'ct_implant.nii');
+                assert(exist(ctFile,'file')==2, ...
+                    '[manualLocalize] Coregistered CT not found: %s\nRun coregisterCT first.', ctFile);
+                aff1D  = S_xfm.aff1D;
+                ctBrik = fullfile(workDir, 'ct_implant+orig');
+                assert(exist([ctBrik '.BRIK'],'file')==2 || exist([ctBrik '.BRIK.gz'],'file')==2, ...
+                    '[manualLocalize] CT BRIK not found: %s.BRIK(.gz)\nRun coregisterCT first.', ctBrik);
+            end
 
             % ---- Load CT ----
             info = niftiinfo(ctFile);
@@ -1499,75 +1433,62 @@ classdef electrodeLocalizer < handle
                     vox_0(mi,:) = round(vox_h(1:3)) - 1;
                 end
 
-                % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
-                % Flip each axis where NIfTI and BRIK directions are opposite.
-                % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
-                ct_bvox = vox_0;
-                if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
-                if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
-                if Txfm(3,3) > 0, ct_bvox(:,3) = (nz-1) - ct_bvox(:,3); end
-
-                % ---- Step 3: CT BRIK voxel → CT AFNI DICOM ----
-                [~, ct_hdr] = unix(sprintf('"%s/3dinfo" -di -dj -dk -o3 "%s+orig" 2>/dev/null', ...
-                    self.afniBin, fullfile(workDir,'ct_implant')));
-                ct_v = sscanf(ct_hdr, '%f');   % [di dj dk ox oy oz]
-                ct_vs  = ct_v(1:3)';
-                ct_org = ct_v(4:6)';
-                ct_dicom = ct_bvox .* ct_vs + ct_org;
-
-                % ---- Step 4: CT AFNI DICOM → MR AFNI DICOM via inv(aff12.1D) ----
-                fid    = fopen(aff1D, 'r');
-                M_vals = fscanf(fid, '%f', 12);
-                fclose(fid);
-                M_raw  = reshape(M_vals(:), 4, 3)';   % 3×4 (column-major fill → transpose)
-                M4     = [M_raw; 0 0 0 1];
-                invM4  = inv(M4);
-                ct_h     = [ct_dicom, ones(nReal,1)]';  % 4 × nReal
-                mr_dicom = (invM4 * ct_h)';             % nReal × 4
-                mr_dicom = mr_dicom(:,1:3);
-
-                % ---- Step 4b (stroke only): post-op MRI DICOM → pre-op MRI DICOM ----
-                % Apply the second transform (post-op MRI → pre-op MRI) so the
-                % final coordinates are in pre-op MRI / FreeSurfer space.
-                if self.strokeMode
-                    xfmPostFile = fullfile(self.locDirs.mr_post_xfm, 'transform.mat');
-                    S_post = load(xfmPostFile, 'aff1D');
-                    fid2   = fopen(S_post.aff1D, 'r');
-                    M_vals2 = fscanf(fid2, '%f', 12);
-                    fclose(fid2);
-                    M_raw2 = reshape(M_vals2(:), 4, 3)';
-                    M4b    = [M_raw2; 0 0 0 1];
-                    postop_h    = [mr_dicom, ones(nReal,1)]';
-                    mr_dicom    = (inv(M4b) * postop_h)';
-                    mr_dicom    = mr_dicom(:,1:3);
-                    mrBrikDir   = self.locDirs.mr_post_xfm;  % pre_do+orig lives here
-                    mrNiiForXfm = fullfile(self.locDirs.mr_post_xfm, 'mr_pre.nii');
+                if isManualCoreg
+                    % ---- Manual coreg shortcut ----
+                    % CT NIfTI is already in MRI world space (FreeView baked the
+                    % user's transform into the header). vox2mm gives FS RAS directly.
+                    world_h = vox2mm(vox_0);      % nReal × 4
+                    xyzFS   = world_h(:, 1:3);
                 else
-                    mrBrikDir   = workDir;
-                    mrNiiForXfm = fullfile(workDir, 'mr_pre.nii');
+                    % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
+                    % Flip each axis where NIfTI and BRIK directions are opposite.
+                    % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
+                    ct_bvox = vox_0;
+                    if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
+                    if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
+                    if Txfm(3,3) > 0, ct_bvox(:,3) = (nz-1) - ct_bvox(:,3); end
+
+                    % ---- Step 3: CT BRIK voxel → CT AFNI DICOM ----
+                    [~, ct_hdr] = unix(sprintf('"%s/3dinfo" -di -dj -dk -o3 "%s+orig" 2>/dev/null', ...
+                        self.afniBin, fullfile(workDir,'ct_implant')));
+                    ct_v = sscanf(ct_hdr, '%f');   % [di dj dk ox oy oz]
+                    ct_vs  = ct_v(1:3)';
+                    ct_org = ct_v(4:6)';
+                    ct_dicom = ct_bvox .* ct_vs + ct_org;
+
+                    % ---- Step 4: CT AFNI DICOM → MR AFNI DICOM via inv(aff12.1D) ----
+                    fid    = fopen(aff1D, 'r');
+                    M_vals = fscanf(fid, '%f', 12);
+                    fclose(fid);
+                    M_raw  = reshape(M_vals(:), 4, 3)';   % 3×4 (column-major fill → transpose)
+                    M4     = [M_raw; 0 0 0 1];
+                    invM4  = inv(M4);
+                    ct_h     = [ct_dicom, ones(nReal,1)]';  % 4 × nReal
+                    mr_dicom = (invM4 * ct_h)';             % nReal × 4
+                    mr_dicom = mr_dicom(:,1:3);
+
+                    % ---- Step 5: MR AFNI DICOM → MR BRIK voxel ----
+                    [~, mr_hdr] = unix(sprintf('"%s/3dinfo" -ni -nj -nk -di -dj -dk -o3 "%s" 2>/dev/null', ...
+                        self.afniBin, fullfile(workDir,'mr_pre_do+orig')));
+                    mr_v       = sscanf(mr_hdr, '%f');   % [ni nj nk di dj dk ox oy oz]
+                    mr_brik_dims = mr_v(1:3)';
+                    mr_vs        = mr_v(4:6)';
+                    mr_org       = mr_v(7:9)';
+                    mr_bvox = round((mr_dicom - mr_org) ./ mr_vs);
+
+                    % ---- Step 6: MR BRIK voxel → mr_pre.nii voxel ----
+                    % RAI BRIK and mr_pre.nii (LPS) have all 3 axes reversed.
+                    % Use mr_brik_dims (not mr_nii dims) because the de-obliqued
+                    % BRIK has more z-slices (278) than the original NIfTI (250).
+                    mr_nii_vox = (mr_brik_dims - 1) - mr_bvox;
+
+                    % ---- Step 7: mr_pre.nii voxel → NIfTI RAS ----
+                    mr_nii_info = niftiinfo(fullfile(workDir, 'mr_pre.nii'));
+                    mr_T = mr_nii_info.Transform.T;  % 4×4 MATLAB affine (1-based row-vec → world)
+                    mr_vox_1 = mr_nii_vox + 1;       % 0-indexed → 1-indexed
+                    mr_ras_h = [mr_vox_1, ones(nReal,1)] * mr_T;  % nReal × 4
+                    xyzFS = mr_ras_h(:, 1:3);
                 end
-
-                % ---- Step 5: MR AFNI DICOM → MR BRIK voxel ----
-                [~, mr_hdr] = unix(sprintf('"%s/3dinfo" -ni -nj -nk -di -dj -dk -o3 "%s" 2>/dev/null', ...
-                    self.afniBin, fullfile(mrBrikDir,'mr_pre_do+orig')));
-                mr_v       = sscanf(mr_hdr, '%f');   % [ni nj nk di dj dk ox oy oz]
-                mr_brik_dims = mr_v(1:3)';
-                mr_vs        = mr_v(4:6)';
-                mr_org       = mr_v(7:9)';
-                mr_bvox = round((mr_dicom - mr_org) ./ mr_vs);
-
-                % ---- Step 6: MR BRIK voxel → mr_pre.nii voxel ----
-                % RAI BRIK and mr_pre.nii (LPS) have all 3 axes reversed.
-                % Use mr_brik_dims (not mr_nii dims) because the de-obliqued
-                % BRIK has more z-slices (278) than the original NIfTI (250).
-                mr_nii_vox = (mr_brik_dims - 1) - mr_bvox;
-
-                % ---- Step 7: mr_pre.nii voxel → NIfTI RAS ----
-                mr_nii_info = niftiinfo(mrNiiForXfm);
-                mr_T = mr_nii_info.Transform.T;  % 4×4 MATLAB affine (1-based row-vec → world)
-                mr_vox_1 = mr_nii_vox + 1;       % 0-indexed → 1-indexed
-                mr_ras_h = [mr_vox_1, ones(nReal,1)] * mr_T;  % nReal × 4
-                xyzFS = mr_ras_h(:, 1:3);
 
                 mkrsFS = mkrs;
                 for mi = 1:nReal
