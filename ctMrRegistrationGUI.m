@@ -311,10 +311,9 @@ uiwait(fig);
         ct_b = reshape(hmap(idx(:),3), size(ct_n));
         ct_rgb = cat(3, ct_r, ct_g, ct_b);
 
-        % Alpha scales with ct_n: bottom of window (soft tissue/air) → transparent,
-        % top of window (bone/metal) → full ctAlpha opacity.
-        % Adjust CT W/L to control where transparency kicks in.
-        a = ctAlpha * ct_n .* double(~isnan(ctSlice));
+        % Alpha = ctAlpha * sqrt(ct_n): air/soft-tissue (ct_n≈0) stays transparent,
+        % bone/metal (ct_n≈1) gets full ctAlpha. sqrt boosts mid-range bone brightness.
+        a = ctAlpha * sqrt(ct_n) .* double(~isnan(ctSlice));
         a3 = repmat(a, 1, 1, 3);
         rgb = min(max((1-a3).*mr_rgb + a3.*ct_rgb, 0), 1);
     end
@@ -445,19 +444,24 @@ uiwait(fig);
 
         dx = delta(1);  dy = delta(2);    % figure y increases upward → positive = drag up
 
+        % When XDir='reverse' on a view axis, display-right = world-left on that axis.
+        % Negate dx for those axes so the CT follows the drag correctly.
+        xSignAx  = ternary(ax_xFlip,  -1, 1);   % axial / coronal share the same x flip
+        xSignSag = 1;                            % sagittal x (dim2/y) flip already aligns
+
         ax = dragAxSel;
         switch mode_
             case 'translate'
                 s = k * SENS_TR;
-                if     ax == axAx,  tx = dragState0(1)+dx*s; ty = dragState0(2)+dy*s;
-                elseif ax == axCor, tx = dragState0(1)+dx*s; tz = dragState0(3)+dy*s;
-                elseif ax == axSag, ty = dragState0(2)+dx*s; tz = dragState0(3)+dy*s;
+                if     ax == axAx,  tx = dragState0(1)+dx*s*xSignAx; ty = dragState0(2)+dy*s;
+                elseif ax == axCor, tx = dragState0(1)+dx*s*xSignAx; tz = dragState0(3)+dy*s;
+                elseif ax == axSag, ty = dragState0(2)+dx*s*xSignSag; tz = dragState0(3)+dy*s;
                 end
             case 'rotate'
                 s = k * SENS_ROT;
-                if     ax == axAx,  rz = dragState0(6)+dx*s;
-                elseif ax == axCor, ry = dragState0(5)+dx*s;
-                elseif ax == axSag, rx = dragState0(4)+dx*s;
+                if     ax == axAx,  rz = dragState0(6)+dx*s*xSignAx;
+                elseif ax == axCor, ry = dragState0(5)+dx*s*xSignAx;
+                elseif ax == axSag, rx = dragState0(4)+dx*s*xSignSag;
                 end
             case 'scale'
                 s = k * SENS_SC;
