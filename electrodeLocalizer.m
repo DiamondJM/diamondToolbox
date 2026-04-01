@@ -2481,7 +2481,7 @@ classdef electrodeLocalizer < handle
         Tct = ctInfo.Transform.T;
 
         %% ---- State ----
-        tx = 0; ty = 0; tz = 0;
+        tx = 0; ty = 0; tz = 0;  % overwritten below after ctCtrWorld is computed
         rx = 0; ry = 0; rz = 0;
         sc = 1.0;
         ctAlpha = 0.5;
@@ -2493,6 +2493,12 @@ classdef electrodeLocalizer < handle
 
         ctCtrVox   = [(size(ctVol,1)+1)/2, (size(ctVol,2)+1)/2, (size(ctVol,3)+1)/2];
         ctCtrWorld = [ctCtrVox, 1] * Tct;
+
+        % Initialise translation so CT centre aligns with MRI centre
+        mrCtr0 = [round(nxMr/2), round(nyMr/2), round(nzMr/2), 1] * Tmr;
+        tx = mrCtr0(1) - ctCtrWorld(1);
+        ty = mrCtr0(2) - ctCtrWorld(2);
+        tz = mrCtr0(3) - ctCtrWorld(3);
 
         isDragging   = false;
         dragFigStart = [];
@@ -2655,11 +2661,7 @@ classdef electrodeLocalizer < handle
                 'Callback',@(h,~) cbEditParam(ii, str2double(get(h,'String'))));
         end
 
-        uicontrol(fig,'Style','pushbutton','String','Align Centers', ...
-            'Units','normalized','Position',[rp 0.265 rw*0.95 0.048], ...
-            'BackgroundColor',[0.3 0.45 0.6],'ForegroundColor','w', ...
-            'FontSize',10,'Callback',@cbAlignCenters);
-        uicontrol(fig,'Style','pushbutton','String','Reset Transform', ...
+        uicontrol(fig,'Style','pushbutton','String','Reset to Center', ...
             'Units','normalized','Position',[rp 0.208 rw*0.95 0.048], ...
             'BackgroundColor',[0.55 0.25 0.25],'ForegroundColor','w', ...
             'FontSize',10,'Callback',@cbReset);
@@ -2928,11 +2930,10 @@ classdef electrodeLocalizer < handle
                 refreshAll();
             end
 
-            function cbReset(~,~),  tx=0;ty=0;tz=0;rx=0;ry=0;rz=0;sc=1; refreshAll(); end
-
-            function cbAlignCenters(~,~)
+            function cbReset(~,~)
                 mrCtr = [round(nxMr/2),round(nyMr/2),round(nzMr/2),1]*Tmr;
                 tx=mrCtr(1)-ctCtrWorld(1); ty=mrCtr(2)-ctCtrWorld(2); tz=mrCtr(3)-ctCtrWorld(3);
+                rx=0; ry=0; rz=0; sc=1;
                 refreshAll();
             end
 
