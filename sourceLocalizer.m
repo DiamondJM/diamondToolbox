@@ -1852,9 +1852,12 @@ classdef sourceLocalizer < handle
                 freqs = freqs(freqs < Fs/2);   % skip harmonics above Nyquist
                 fprintf('[downsampleTs] Notching %s Hz.\n', num2str(freqs, '%.0f '));
                 for f = freqs
-                    wo = f / (Fs/2);
-                    bw = wo / 35;              % Q~35: narrow notch
-                    [b, a] = iirnotch(wo, bw);
+                    % 2nd-order IIR notch (no toolbox required)
+                    % r controls notch width: closer to 1 = narrower
+                    r  = 0.9997;
+                    wo = 2 * pi * f / Fs;
+                    b  = [1, -2*cos(wo), 1];
+                    a  = [1, -2*r*cos(wo), r^2];
                     ts = filtfilt(b, a, ts);
                 end
             end
