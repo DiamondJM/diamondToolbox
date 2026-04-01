@@ -806,17 +806,18 @@ classdef electrodeLocalizer < handle
                 if cst ~= 0, copyfile(mrNii, mrWork); end
             end
 
-            % Launch FreeView
-            fvBin = fullfile(self.fsBin, 'freeview');
-            if exist(fvBin, 'file') ~= 2
-                fvBin = '/Applications/freesurfer/8.1.0/bin/freeview';
+            % Launch FreeView via 'open -a' (macOS) so it gets the correct
+            % app environment without needing FreeSurfer env vars on PATH.
+            fvApp = fullfile(fileparts(self.fsBin), 'Freeview.app');
+            if ~exist(fvApp, 'dir')
+                fvApp = '/Applications/freesurfer/8.1.0/Freeview.app';
             end
-            assert(exist(fvBin,'file')==2, ...
-                '[manualCoregisterCT] FreeView not found at: %s', fvBin);
+            assert(exist(fvApp,'dir')==7, ...
+                '[manualCoregisterCT] Freeview.app not found at: %s', fvApp);
 
             fprintf('[Stage 5] Launching FreeView for manual CT-MR registration...\n');
-            unix(sprintf('"%s" -v "%s" -v "%s:colormap=heat:opacity=0.5" &', ...
-                fvBin, mrWork, ctWork));
+            unix(sprintf('open -a "%s" --args -v "%s" -v "%s:colormap=heat:opacity=0.5"', ...
+                fvApp, mrWork, ctWork));
 
             % Wait for user
             msg = { ...
