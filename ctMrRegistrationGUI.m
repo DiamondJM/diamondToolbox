@@ -460,9 +460,9 @@ uiwait(fig);
                 end
             case 'rotate'
                 s = k * SENS_ROT;
-                if     ax == axAx,  rz = dragState0(6)+dx*s*xSignAx;
+                if     ax == axAx,  rz = dragState0(6)+dx*s*(-xSignAx);
                 elseif ax == axCor, ry = dragState0(5)+dx*s*xSignAx;
-                elseif ax == axSag, rx = dragState0(4)+dx*s*xSignSag;
+                elseif ax == axSag, rx = dragState0(4)+dx*s*(-xSignSag);
                 end
             case 'scale'
                 s = k * SENS_SC;
