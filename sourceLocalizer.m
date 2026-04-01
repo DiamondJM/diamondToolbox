@@ -1801,61 +1801,36 @@ classdef sourceLocalizer < handle
 
         end
 
-        function filterSD(self, varargin)
-        % FILTERSD  Filter timeSeries in-place for spreading depolarization detection.
+        function downsampleTs(self, varargin)
+        % DOWNSAMPLETS  Downsample timeSeries in-place.
         %
         % Usage:
-        %   sl.filterSD()
-        %   sl.filterSD('hpFreq', 0.01, 'lpFreq', 0.5, 'targetFs', 10)
+        %   sl.downsampleTs()
+        %   sl.downsampleTs('targetFs', 10)
         %
-        % Spreading depolarizations produce a large slow DC shift visible in
-        % the 0.01–0.5 Hz band. Overwrites sl.timeSeries and updates sl.Fs.
+        % Overwrites sl.timeSeries and updates sl.Fs.
         %
         % Parameters:
-        %   hpFreq    - high-pass cutoff Hz      (default 0.01)
-        %   lpFreq    - low-pass cutoff Hz        (default 0.5)
-        %   targetFs  - downsample to this rate   (default 10 Hz; [] = skip)
+        %   targetFs  - target sample rate in Hz (default 10)
 
             p = inputParser;
-            addParameter(p, 'hpFreq',   0.01);
-            addParameter(p, 'lpFreq',   0.5);
             addParameter(p, 'targetFs', 10);
             parse(p, varargin{:});
-            hpFreq   = p.Results.hpFreq;
-            lpFreq   = p.Results.lpFreq;
             targetFs = p.Results.targetFs;
 
             assert(~isempty(self.timeSeries), ...
-                '[filterSD] timeSeries is empty — load data first.');
+                '[downsampleTs] timeSeries is empty — load data first.');
             assert(~isempty(self.Fs) && self.Fs > 0, ...
-                '[filterSD] Fs not set.');
+                '[downsampleTs] Fs not set.');
+            assert(targetFs < self.Fs, ...
+                '[downsampleTs] targetFs (%.4g) must be less than current Fs (%.4g).', targetFs, self.Fs);
 
-            ts  = double(self.timeSeries);   % [samples × channels]
-            Fs  = self.Fs;
+            [p_r, q_r] = rat(targetFs / self.Fs);
+            ts = resample(double(self.timeSeries), p_r, q_r);
+            Fs = self.Fs * p_r / q_r;
 
-            assert(lpFreq < Fs/2, ...
-                '[filterSD] lpFreq (%.2f Hz) must be below Nyquist (%.1f Hz).', lpFreq, Fs/2);
-
-            % Design 4th-order zero-phase Butterworth bandpass via SOS for
-            % numerical stability at the very low normalized frequencies involved.
-            Wn = [hpFreq, lpFreq] / (Fs / 2);
-            [z, p, k] = butter(4, Wn, 'bandpass');
-            sos = zp2sos(z, p, k);
-
-            fprintf('[filterSD] Bandpass filtering %d ch at %.3f–%.2f Hz (zero-phase)...\n', ...
-                size(ts, 2), hpFreq, lpFreq);
-
-            % filtfilt with SOS: forward + backward pass, zero phase distortion
-            ts = filtfilt(sos, 1, ts);
-
-            % Downsample
-            if ~isempty(targetFs) && targetFs < Fs
-                [p_r, q_r] = rat(targetFs / Fs);
-                ts = resample(ts, p_r, q_r);
-                Fs = Fs * p_r / q_r;
-                fprintf('[filterSD] Downsampled to %.4g Hz → %d samples.\n', ...
-                    Fs, size(ts, 1));
-            end
+            fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
+                self.Fs, Fs, size(ts, 1));
 
             self.timeSeries = ts;
             self.Fs = Fs;
