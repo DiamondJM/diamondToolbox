@@ -609,13 +609,13 @@ classdef electrodeLocalizer < handle
 
         function coregisterCT(self, varargin)
             % CT-to-MR coregistration.
-            % Default method is 'manual': launches FreeView for user to align CT to MRI.
-            % Use 'method','auto' for automatic AFNI alignment.
+            % Default method is 'auto': AFNI affine alignment.
+            % Use 'method','manual' to launch the interactive registration GUI.
             % Saves result to zloc/CT_1/transform/transform.mat.
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'method',   'manual');  % 'manual' or 'auto'
+            addParameter(p, 'method',   'auto');    % 'auto' or 'manual'
             addParameter(p, 'cost', 'lpc');          % auto only: alignment cost function
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
