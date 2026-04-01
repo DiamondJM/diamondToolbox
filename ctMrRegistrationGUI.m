@@ -155,16 +155,42 @@ addlistener(hAlphaSlider,'Value','PostSet',@(~,~)cbAlphaLive());
 % Square panels (pixel-equal) so isotropic data fills without black bars.
 % DataAspectRatio corrects for non-isotropic MRI voxels.
 figPos = get(fig,'Position');
-panW = 0.235;
-panH = panW * figPos(3) / figPos(4);
-panY = (tb2Y - panH) / 2 + 0.005;
+panW  = 0.220;
+scrollW = 0.013;
+panH  = panW * figPos(3) / figPos(4);
+panY  = (tb2Y - panH) / 2 + 0.005;
 
-axAx  = axes('Parent',fig,'Position',[0.005 panY panW panH], ...
+% Panel x positions: panel → scrollbar → gap → panel → ...
+axAxX  = 0.005;
+slAxX  = axAxX  + panW + 0.001;
+axCorX = slAxX  + scrollW + 0.006;
+slCorX = axCorX + panW + 0.001;
+axSagX = slCorX + scrollW + 0.006;
+slSagX = axSagX + panW + 0.001;
+
+axAx  = axes('Parent',fig,'Position',[axAxX  panY panW panH], ...
     'Color','k','XColor','none','YColor','none'); hold(axAx,'on');
-axCor = axes('Parent',fig,'Position',[0.248 panY panW panH], ...
+axCor = axes('Parent',fig,'Position',[axCorX panY panW panH], ...
     'Color','k','XColor','none','YColor','none'); hold(axCor,'on');
-axSag = axes('Parent',fig,'Position',[0.491 panY panW panH], ...
+axSag = axes('Parent',fig,'Position',[axSagX panY panW panH], ...
     'Color','k','XColor','none','YColor','none'); hold(axSag,'on');
+
+% Slice scrollbars (tall+narrow → vertical slider)
+hSlAx  = uicontrol(fig,'Style','slider','Min',1,'Max',nzMr,'Value',curVox(3), ...
+    'SliderStep',[1/(nzMr-1), 10/(nzMr-1)], ...
+    'Units','normalized','Position',[slAxX  panY scrollW panH], ...
+    'BackgroundColor',bg2,'Callback',@(~,~)cbSlider(1));
+hSlCor = uicontrol(fig,'Style','slider','Min',1,'Max',nyMr,'Value',curVox(2), ...
+    'SliderStep',[1/(nyMr-1), 10/(nyMr-1)], ...
+    'Units','normalized','Position',[slCorX panY scrollW panH], ...
+    'BackgroundColor',bg2,'Callback',@(~,~)cbSlider(2));
+hSlSag = uicontrol(fig,'Style','slider','Min',1,'Max',nxMr,'Value',curVox(1), ...
+    'SliderStep',[1/(nxMr-1), 10/(nxMr-1)], ...
+    'Units','normalized','Position',[slSagX panY scrollW panH], ...
+    'BackgroundColor',bg2,'Callback',@(~,~)cbSlider(3));
+addlistener(hSlAx,  'Value','PostSet',@(~,~)cbSlider(1));
+addlistener(hSlCor, 'Value','PostSet',@(~,~)cbSlider(2));
+addlistener(hSlSag, 'Value','PostSet',@(~,~)cbSlider(3));
 
 hImAx  = []; hImCor = []; hImSag = [];
 hXHax  = []; hXHcor = []; hXHsag = [];
@@ -377,6 +403,10 @@ uiwait(fig);
 
         refreshCrosshairs();
         updateReadouts();
+        % Sync scrollbars to current slice (suppressed if driven by slider itself)
+        if ishandle(hSlAx),  set(hSlAx,  'Value', curVox(3)); end
+        if ishandle(hSlCor), set(hSlCor, 'Value', curVox(2)); end
+        if ishandle(hSlSag), set(hSlSag, 'Value', curVox(1)); end
     end
 
     function refreshCrosshairs()
@@ -546,6 +576,16 @@ uiwait(fig);
 
     function cbAlphaLive()
         ctAlpha = get(hAlphaSlider,'Value');
+        refreshAll();
+    end
+
+    function cbSlider(dim)
+        % dim: 1=axial(z), 2=coronal(y), 3=sagittal(x)
+        switch dim
+            case 1, curVox(3) = round(get(hSlAx,  'Value'));
+            case 2, curVox(2) = round(get(hSlCor, 'Value'));
+            case 3, curVox(1) = round(get(hSlSag, 'Value'));
+        end
         refreshAll();
     end
 
