@@ -311,7 +311,10 @@ uiwait(fig);
         ct_b = reshape(hmap(idx(:),3), size(ct_n));
         ct_rgb = cat(3, ct_r, ct_g, ct_b);
 
-        a = ctAlpha * double(~isnan(ctSlice));
+        % Alpha scales with ct_n: bottom of window (soft tissue/air) → transparent,
+        % top of window (bone/metal) → full ctAlpha opacity.
+        % Adjust CT W/L to control where transparency kicks in.
+        a = ctAlpha * ct_n .* double(~isnan(ctSlice));
         a3 = repmat(a, 1, 1, 3);
         rgb = min(max((1-a3).*mr_rgb + a3.*ct_rgb, 0), 1);
     end
@@ -440,7 +443,7 @@ uiwait(fig);
         fine  = any(strcmp(get(fig,'CurrentModifier'),'shift'));
         k = ternary(fine, 0.1, 1.0);
 
-        dx = delta(1);  dy = -delta(2);   % dy: invert so up = positive
+        dx = delta(1);  dy = delta(2);    % figure y increases upward → positive = drag up
 
         ax = dragAxSel;
         switch mode_
