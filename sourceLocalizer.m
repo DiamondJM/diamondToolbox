@@ -1809,25 +1809,32 @@ classdef sourceLocalizer < handle
         %   sl.downsampleTs('targetFs', 10, 'zThresh', 10, 'medFiltMin', 30)
         %
         % Steps (in order):
-        %   1. Linearly interpolate samples where |z-score| > zThresh (on full-res data)
-        %   2. Resample to targetFs
-        %   3. Subtract per-channel moving median to remove slow baseline drift
+        %   1. Notch filter at line frequency and harmonics
+        %   2. Linearly interpolate samples where |z-score| > zThresh (on full-res data)
+        %   3. Resample to targetFs
+        %   4. Subtract per-channel moving median to remove slow baseline drift
         %
         % Overwrites sl.timeSeries and updates sl.Fs.
         %
         % Parameters:
-        %   targetFs    - target sample rate in Hz        (default 10)
-        %   zThresh     - artifact z-score threshold      (default 10; [] = skip)
-        %   medFiltMin  - median filter window in minutes (default 30; [] = skip)
+        %   targetFs    - target sample rate in Hz              (default 10)
+        %   zThresh     - artifact z-score threshold            (default 10; [] = skip)
+        %   medFiltMin  - median filter window in minutes       (default 30; [] = skip)
+        %   lineFreq    - line noise frequency in Hz            (default 60)
+        %   lineHarms   - harmonics to notch (multiples)        (default [1 2 3]; [] = skip notch)
 
             p = inputParser;
             addParameter(p, 'targetFs',   10);
             addParameter(p, 'zThresh',    10);
             addParameter(p, 'medFiltMin', 30);
+            addParameter(p, 'lineFreq',   60);
+            addParameter(p, 'lineHarms',  [1 2 3]);
             parse(p, varargin{:});
             targetFs   = p.Results.targetFs;
             zThresh    = p.Results.zThresh;
             medFiltMin = p.Results.medFiltMin;
+            lineFreq   = p.Results.lineFreq;
+            lineHarms  = p.Results.lineHarms;
 
             assert(~isempty(self.timeSeries), ...
                 '[downsampleTs] timeSeries is empty — load data first.');
@@ -1837,8 +1844,22 @@ classdef sourceLocalizer < handle
                 '[downsampleTs] targetFs (%.4g) must be less than current Fs (%.4g).', targetFs, self.Fs);
 
             ts = double(self.timeSeries);
+            Fs = self.Fs;
 
-            % 1. Artifact rejection on full-resolution data (before anti-aliasing filter sees spikes)
+            % 1. Notch filter line noise and harmonics
+            if ~isempty(lineHarms)
+                freqs = lineFreq * lineHarms;
+                freqs = freqs(freqs < Fs/2);   % skip harmonics above Nyquist
+                fprintf('[downsampleTs] Notching %s Hz.\n', num2str(freqs, '%.0f '));
+                for f = freqs
+                    wo = f / (Fs/2);
+                    bw = wo / 35;              % Q~35: narrow notch
+                    [b, a] = iirnotch(wo, bw);
+                    ts = filtfilt(b, a, ts);
+                end
+            end
+
+            % 2. Artifact rejection on full-resolution data (before anti-aliasing filter sees spikes)
             if ~isempty(zThresh)
                 bad  = abs(zscore(ts)) > zThresh;
                 nBad = sum(bad(:));
@@ -1854,14 +1875,15 @@ classdef sourceLocalizer < handle
                 end
             end
 
-            % 2. Downsample
-            [p_r, q_r] = rat(targetFs / self.Fs);
+            % 3. Downsample
+            [p_r, q_r] = rat(targetFs / Fs);
+            FsOld = Fs;
             ts = resample(ts, p_r, q_r);
-            Fs = self.Fs * p_r / q_r;
+            Fs = FsOld * p_r / q_r;
             fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
-                self.Fs, Fs, size(ts, 1));
+                FsOld, Fs, size(ts, 1));
 
-            % 3. Median filter baseline removal
+            % 4. Median filter baseline removal
             if ~isempty(medFiltMin)
                 winSamp = 2*floor(medFiltMin * 60 * Fs / 2) + 1;  % must be odd
                 fprintf('[downsampleTs] Removing baseline with %.0f-min median filter.\n', medFiltMin);
