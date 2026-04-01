@@ -1318,8 +1318,8 @@ classdef electrodeLocalizer < handle
             Txfm = info.Transform.T;                 % 4×4 MATLAB affine (1-based vox → world)
             [nx, ny, nz] = size(vol);
 
-            % vox2mm: 1-based [i,j,k] row-vector → world mm row-vector
-            vox2mm = @(v) ([v, 1] * Txfm);
+            % vox2mm: 1-based [i,j,k] row-vector(s) → world mm row-vector(s)
+            vox2mm = @(v) ([v, ones(size(v,1),1)] * Txfm);
 
             % ---- Sort chanNames (same logic as namingGUI) ----
             sortedChanNames = self.chanNames;
