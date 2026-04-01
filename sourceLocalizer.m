@@ -1801,25 +1801,20 @@ classdef sourceLocalizer < handle
 
         end
 
-        function [tsOut, FsOut] = filterSD(self, varargin)
-        % FILTERSD  Filter time series for spreading depolarization detection.
+        function filterSD(self, varargin)
+        % FILTERSD  Filter timeSeries in-place for spreading depolarization detection.
         %
         % Usage:
-        %   [tsSD, FsSD] = sl.filterSD()
-        %   [tsSD, FsSD] = sl.filterSD('hpFreq', 0.01, 'lpFreq', 0.5, 'targetFs', 10)
+        %   sl.filterSD()
+        %   sl.filterSD('hpFreq', 0.01, 'lpFreq', 0.5, 'targetFs', 10)
         %
         % Spreading depolarizations produce a large slow DC shift visible in
-        % the 0.01–0.5 Hz band. The output is bandpass filtered and optionally
-        % downsampled to reduce data size.
+        % the 0.01–0.5 Hz band. Overwrites sl.timeSeries and updates sl.Fs.
         %
         % Parameters:
         %   hpFreq    - high-pass cutoff Hz      (default 0.01)
         %   lpFreq    - low-pass cutoff Hz        (default 0.5)
         %   targetFs  - downsample to this rate   (default 10 Hz; [] = skip)
-        %
-        % Output:
-        %   tsOut  - filtered [samples × channels] matrix
-        %   FsOut  - sampling rate of output
 
             p = inputParser;
             addParameter(p, 'hpFreq',   0.01);
@@ -1851,17 +1846,19 @@ classdef sourceLocalizer < handle
                 size(ts, 2), hpFreq, lpFreq);
 
             % filtfilt with SOS: forward + backward pass, zero phase distortion
-            tsOut = filtfilt(sos, 1, ts);
+            ts = filtfilt(sos, 1, ts);
 
             % Downsample
-            FsOut = Fs;
             if ~isempty(targetFs) && targetFs < Fs
                 [p_r, q_r] = rat(targetFs / Fs);
-                tsOut = resample(tsOut, p_r, q_r);
-                FsOut = Fs * p_r / q_r;
+                ts = resample(ts, p_r, q_r);
+                Fs = Fs * p_r / q_r;
                 fprintf('[filterSD] Downsampled to %.4g Hz → %d samples.\n', ...
-                    FsOut, size(tsOut, 1));
+                    Fs, size(ts, 1));
             end
+
+            self.timeSeries = ts;
+            self.Fs = Fs;
         end
 
     end
