@@ -340,6 +340,9 @@ classdef electrodeLocalizer < handle
             % Signal Processing Toolbox
             prereqs.sigproc = license('test','signal_toolbox') && ~isempty(ver('signal'));
 
+            % Statistics and Machine Learning Toolbox
+            prereqs.stats = license('test','statistics_toolbox') && ~isempty(ver('stats'));
+
             % FreeSurfer — check that recon-all exists at the expected bin path.
             % Executing it directly from MATLAB fails because recon-all is a
             % shell script that requires FREESURFER_HOME to be set, which GUI
@@ -358,6 +361,12 @@ classdef electrodeLocalizer < handle
                 missing{end+1} = sprintf( ...
                     '  [REQUIRED] Signal Processing Toolbox\n%s', ...
                     '             Needed for: EEG time-series processing');
+            end
+
+            if ~prereqs.stats
+                missing{end+1} = sprintf( ...
+                    '  [REQUIRED] Statistics and Machine Learning Toolbox\n%s', ...
+                    '             Needed for: clustering and statistical analysis');
             end
 
             if ~prereqs.gifti
@@ -387,8 +396,9 @@ classdef electrodeLocalizer < handle
             fprintf('\n+----------------------------------------------------------+\n');
             fprintf('|       electrodeLocalizer — Prerequisites (%s)\n', self.subj);
             fprintf('+----------------------------------------------------------+\n');
-            electrodeLocalizer.printPrereqLine('Signal Processing Toolbox', prereqs.sigproc,               true);
-            electrodeLocalizer.printPrereqLine('gifti toolbox',             prereqs.gifti,                 true);
+            electrodeLocalizer.printPrereqLine('Signal Processing Toolbox',           prereqs.sigproc, true);
+            electrodeLocalizer.printPrereqLine('Statistics & ML Toolbox',            prereqs.stats,   true);
+            electrodeLocalizer.printPrereqLine('gifti toolbox',                      prereqs.gifti,   true);
             electrodeLocalizer.printPrereqLine(sprintf('FreeSurfer  (%s)', self.fsBin),  prereqs.freesurfer, needSurface);
             electrodeLocalizer.printPrereqLine(sprintf('AFNI/SUMA   (%s)', self.afniBin), prereqs.afni,      needSuma);
             fprintf('+----------------------------------------------------------+\n');
