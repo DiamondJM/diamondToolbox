@@ -1809,8 +1809,8 @@ classdef sourceLocalizer < handle
         %   sl.downsampleTs('targetFs', 10, 'zThresh', 10, 'medFiltMin', 30)
         %
         % Steps (in order):
-        %   1. Resample to targetFs
-        %   2. Linearly interpolate samples where |z-score| > zThresh
+        %   1. Linearly interpolate samples where |z-score| > zThresh (on full-res data)
+        %   2. Resample to targetFs
         %   3. Subtract per-channel moving median to remove slow baseline drift
         %
         % Overwrites sl.timeSeries and updates sl.Fs.
@@ -1836,14 +1836,9 @@ classdef sourceLocalizer < handle
             assert(targetFs < self.Fs, ...
                 '[downsampleTs] targetFs (%.4g) must be less than current Fs (%.4g).', targetFs, self.Fs);
 
-            % 1. Downsample
-            [p_r, q_r] = rat(targetFs / self.Fs);
-            ts = resample(double(self.timeSeries), p_r, q_r);
-            Fs = self.Fs * p_r / q_r;
-            fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
-                self.Fs, Fs, size(ts, 1));
+            ts = double(self.timeSeries);
 
-            % 2. Artifact rejection: interpolate samples exceeding z-score threshold
+            % 1. Artifact rejection on full-resolution data (before anti-aliasing filter sees spikes)
             if ~isempty(zThresh)
                 bad  = abs(zscore(ts)) > zThresh;
                 nBad = sum(bad(:));
@@ -1858,6 +1853,13 @@ classdef sourceLocalizer < handle
                     end
                 end
             end
+
+            % 2. Downsample
+            [p_r, q_r] = rat(targetFs / self.Fs);
+            ts = resample(ts, p_r, q_r);
+            Fs = self.Fs * p_r / q_r;
+            fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
+                self.Fs, Fs, size(ts, 1));
 
             % 3. Median filter baseline removal
             if ~isempty(medFiltMin)
