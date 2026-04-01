@@ -444,10 +444,11 @@ uiwait(fig);
 
         dx = delta(1);  dy = delta(2);    % figure y increases upward → positive = drag up
 
-        % When XDir='reverse' on a view axis, display-right = world-left on that axis.
-        % Negate dx for those axes so the CT follows the drag correctly.
-        xSignAx  = ternary(ax_xFlip,  -1, 1);   % axial / coronal share the same x flip
-        xSignSag = 1;                            % sagittal x (dim2/y) flip already aligns
+        % Display-right always maps to -x world in axial/coronal (either because
+        % colX_<0 makes dim1 go in -x, or XDir='reverse' flips it). Always negate.
+        % Sagittal x (dim2/y) has the opposite convention — no negation needed.
+        xSignAx  = -1;
+        xSignSag =  1;
 
         ax = dragAxSel;
         switch mode_
