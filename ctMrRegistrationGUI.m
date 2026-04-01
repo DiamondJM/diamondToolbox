@@ -437,8 +437,7 @@ uiwait(fig);
         if ~isDragging && norm(delta) < 3, return; end
         isDragging = true;
 
-        fine  = strcmp(get(fig,'CurrentModifier'),'shift') || ...
-                any(strcmp(get(fig,'CurrentModifier'),'shift'));
+        fine  = any(strcmp(get(fig,'CurrentModifier'),'shift'));
         k = ternary(fine, 0.1, 1.0);
 
         dx = delta(1);  dy = -delta(2);   % dy: invert so up = positive
