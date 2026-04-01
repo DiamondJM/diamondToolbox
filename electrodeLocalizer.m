@@ -635,7 +635,7 @@ classdef electrodeLocalizer < handle
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'method',   'auto');    % 'auto' or 'manual'
+            addParameter(p, 'method',   'manual');  % stroke default: manual GUI
             addParameter(p, 'cost', 'lpc');          % auto only: alignment cost function
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
