@@ -870,10 +870,7 @@ classdef electrodeLocalizer < handle
 
             if isfield(S_xfm, 'manual') && S_xfm.manual
                 % Manual coregistration: CT already in MRI space.
-                % Cluster on ct_manual_coreg+orig, but use the FreeSurfer SurfVol
-                % as the ConvertSurface reference so xfm_leads outputs coordinates
-                % in FreeSurfer TkReg RAS (matching the pial GIFTIs from SUMA).
-                % The MR→SurfVol transform is computed once via 3dAllineate.
+                % Resample to RAI for AFNI clustering, use identity transform.
                 ctCoregNii = S_xfm.ctCoregNii;
                 assert(exist(ctCoregNii,'file')==2, ...
                     '[Stage 6] ct_manual_coreg.nii not found: %s', ctCoregNii);
@@ -884,44 +881,12 @@ classdef electrodeLocalizer < handle
                     cmd = sprintf('"%s/3dcopy" "%s" "%s"', self.afniBin, ctCoregNii, ctBrik);
                     unix(cmd);
                 end
-
-                % Locate FreeSurfer SurfVol
-                sumaDir  = fullfile(self.locDirs.freesurfer, self.subj, 'SUMA');
-                surfVolNii = fullfile(sumaDir, sprintf('%s_SurfVol.nii', self.subj));
-                assert(exist(surfVolNii,'file')==2, ...
-                    '[Stage 6] SurfVol not found: %s\nRun runSurface/runSuma first.', surfVolNii);
-
-                % Convert SurfVol to BRIK if needed
-                surfVolBrik = fullfile(sumaDir, sprintf('%s_SurfVol+orig', self.subj));
-                if ~exist([surfVolBrik '.BRIK'],'file') && ~exist([surfVolBrik '.BRIK.gz'],'file')
-                    fprintf('[Stage 6] Converting SurfVol to AFNI BRIK...\n');
-                    cmd = sprintf('"%s/3dcopy" "%s" "%s"', self.afniBin, surfVolNii, surfVolBrik);
-                    unix(cmd);
-                end
-
-                % Compute MR→SurfVol rigid transform (once; reuse if exists)
-                aff1D = fullfile(workDir, 'mr2surf.aff12.1D');
-                if ~exist(aff1D, 'file')
-                    fprintf('[Stage 6] Computing MR→SurfVol transform via 3dAllineate...\n');
-                    mrNii = fullfile(workDir, 'mr_pre.nii');
-                    assert(exist(mrNii,'file')==2, ...
-                        '[Stage 6] mr_pre.nii not found in transform dir: %s', mrNii);
-                    cmd = sprintf([...
-                        '"%s/3dAllineate" -base "%s" -input "%s" ' ...
-                        '-warp shift_rotate -cost nmi -cmass ' ...
-                        '-1Dmatrix_save "%s" -prefix NULL -overwrite'], ...
-                        self.afniBin, surfVolNii, mrNii, aff1D);
-                    [status, txt] = unix(cmd);
-                    assert(status == 0, '[Stage 6] 3dAllineate failed:\n%s', txt);
-                    fprintf('[Stage 6] MR→SurfVol transform saved: %s\n', aff1D);
-                else
-                    fprintf('[Stage 6] Reusing MR→SurfVol transform: %s\n', aff1D);
-                end
-
-                % Use SurfVol as the ConvertSurface reference volume so that
-                % xfm_leads outputs coordinates in FreeSurfer TkReg RAS.
-                ctBrikForXfm = surfVolBrik;
-                fprintf('[Stage 6] Manual coregistration: using SurfVol as xfm_leads reference.\n');
+                % Write identity aff12.1D (CT already in MRI space)
+                aff1D = fullfile(workDir, 'identity.aff12.1D');
+                fid = fopen(aff1D, 'w');
+                fprintf(fid, ' 1 0 0 0 0 1 0 0 0 0 1 0\n');
+                fclose(fid);
+                fprintf('[Stage 6] Using manual coregistration with identity transform.\n');
             else
                 % Automatic (AFNI) coregistration
                 aff1D = S_xfm.aff1D;
@@ -936,7 +901,6 @@ classdef electrodeLocalizer < handle
                 assert(exist([ctBrik '.BRIK'], 'file') == 2 || ...
                        exist([ctBrik '.BRIK.gz'], 'file') == 2, ...
                     '[Stage 6] CT BRIK not found: %s.BRIK(.gz)\n  Re-run coregisterCT.', ctBrik);
-                ctBrikForXfm = ctBrik;
             end
 
             % Ensure AFNI tools are on PATH
@@ -992,7 +956,7 @@ classdef electrodeLocalizer < handle
                 centroids_ct(:,1), centroids_ct(:,2), centroids_ct(:,3), ...
                 'VariableNames', {'chanName','x','y','z'});
 
-            mr_coords = xfm_leads(ct_coords, aff1D, ctBrikForXfm, 'RAI', clustDir);
+            mr_coords = xfm_leads(ct_coords, aff1D, ctBrik, 'RAI', clustDir);
             clusters_mm = mr_coords{:, {'x','y','z'}};
 
             % Spatial proximity filter: drop clusters too far from the pial
