@@ -635,7 +635,7 @@ classdef electrodeLocalizer < handle
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'method',   'auto');    % 'auto' or 'manual'
+            addParameter(p, 'method',   'manual');  % stroke default: manual GUI
             addParameter(p, 'cost', 'lpc');          % auto only: alignment cost function
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
@@ -1425,9 +1425,16 @@ classdef electrodeLocalizer < handle
 
                 if isManualCoreg
                     % ---- Manual coreg shortcut ----
-                    % CT NIfTI is already in MRI world space (FreeView baked the
-                    % user's transform into the header). vox2mm gives FS RAS directly.
-                    world_h = vox2mm(vox_0);      % nReal × 4
+                    % FreeView saves ct_manual_coreg.nii with a simplified diagonal
+                    % affine (orthogonalised from the oblique scan affine). Using it
+                    % directly introduces errors up to ~30mm for oblique acquisitions.
+                    % Use mr_pre.nii's actual oblique affine instead — the two volumes
+                    % share the same voxel grid (FreeView resamples the CT to the MRI
+                    % grid), so the same voxel index maps to the same physical point.
+                    mr_nii_info_c = niftiinfo(fullfile(self.locDirs.mr_pre, 'mr_pre.nii'));
+                    mr_T_c  = mr_nii_info_c.Transform.T;   % 4×4 oblique affine (1-based)
+                    vox_1   = vox_0 + 1;                   % 0-indexed → 1-indexed
+                    world_h = [vox_1, ones(nReal,1)] * mr_T_c;   % nReal × 4
                     xyzFS   = world_h(:, 1:3);
                 else
                     % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
