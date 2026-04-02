@@ -1809,32 +1809,25 @@ classdef sourceLocalizer < handle
         %   sl.downsampleTs('targetFs', 10, 'zThresh', 10, 'medFiltMin', 30)
         %
         % Steps (in order):
-        %   1. Notch filter at line frequency and harmonics
-        %   2. Linearly interpolate samples where |z-score| > zThresh (on full-res data)
-        %   3. Resample to targetFs
-        %   4. Subtract per-channel moving median to remove slow baseline drift
+        %   1. Linearly interpolate samples where |z-score| > zThresh (on full-res data)
+        %   2. Resample to targetFs (resample() applies anti-aliasing lowpass internally)
+        %   3. Subtract per-channel moving median to remove slow baseline drift
         %
         % Overwrites sl.timeSeries and updates sl.Fs.
         %
         % Parameters:
-        %   targetFs    - target sample rate in Hz              (default 10)
+        %   targetFs    - target sample rate in Hz              (default 1)
         %   zThresh     - artifact z-score threshold            (default 10; [] = skip)
         %   medFiltMin  - median filter window in minutes       (default 30; [] = skip)
-        %   lineFreq    - line noise frequency in Hz            (default 60)
-        %   lineHarms   - harmonics to notch (multiples)        (default [1 2 3]; [] = skip notch)
 
             p = inputParser;
-            addParameter(p, 'targetFs',   10);
+            addParameter(p, 'targetFs',   1);
             addParameter(p, 'zThresh',    10);
             addParameter(p, 'medFiltMin', 30);
-            addParameter(p, 'lineFreq',   60);
-            addParameter(p, 'lineHarms',  [1 2 3]);
             parse(p, varargin{:});
             targetFs   = p.Results.targetFs;
             zThresh    = p.Results.zThresh;
             medFiltMin = p.Results.medFiltMin;
-            lineFreq   = p.Results.lineFreq;
-            lineHarms  = p.Results.lineHarms;
 
             assert(~isempty(self.timeSeries), ...
                 '[downsampleTs] timeSeries is empty — load data first.');
@@ -1846,23 +1839,7 @@ classdef sourceLocalizer < handle
             ts = double(self.timeSeries);
             Fs = self.Fs;
 
-            % 1. Notch filter line noise and harmonics
-            if ~isempty(lineHarms)
-                freqs = lineFreq * lineHarms;
-                freqs = freqs(freqs < Fs/2);   % skip harmonics above Nyquist
-                fprintf('[downsampleTs] Notching %s Hz.\n', num2str(freqs, '%.0f '));
-                for f = freqs
-                    % 2nd-order IIR notch (no toolbox required)
-                    % r controls notch width: closer to 1 = narrower
-                    r  = 0.9997;
-                    wo = 2 * pi * f / Fs;
-                    b  = [1, -2*cos(wo), 1];
-                    a  = [1, -2*r*cos(wo), r^2];
-                    ts = filtfilt(b, a, ts);
-                end
-            end
-
-            % 2. Artifact rejection on full-resolution data (before anti-aliasing filter sees spikes)
+            % 1. Artifact rejection on full-resolution data (before anti-aliasing filter sees spikes)
             if ~isempty(zThresh)
                 bad  = abs(zscore(ts)) > zThresh;
                 nBad = sum(bad(:));
@@ -1878,7 +1855,7 @@ classdef sourceLocalizer < handle
                 end
             end
 
-            % 3. Downsample
+            % 2. Downsample
             [p_r, q_r] = rat(targetFs / Fs);
             FsOld = Fs;
             ts = resample(ts, p_r, q_r);
@@ -1886,7 +1863,7 @@ classdef sourceLocalizer < handle
             fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
                 FsOld, Fs, size(ts, 1));
 
-            % 4. Median filter baseline removal
+            % 3. Median filter baseline removal
             if ~isempty(medFiltMin)
                 winSamp = 2*floor(medFiltMin * 60 * Fs / 2) + 1;  % must be odd
                 fprintf('[downsampleTs] Removing baseline with %.0f-min median filter.\n', medFiltMin);
