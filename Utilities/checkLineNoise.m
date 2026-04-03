@@ -18,7 +18,7 @@ if ~plotting; return; end
 
 figure; 
 plot(f,sMean)
-hold on
-plot([60 60],ylim,'k:'); plot([120 120],ylim,'k:'); 
+% hold on
+% plot([60 60],ylim,'k:'); plot([120 120],ylim,'k:'); 
 
 end

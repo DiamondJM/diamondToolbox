@@ -280,9 +280,9 @@ classdef sourceLocalizer < handle
             %% Plot
 
             if ~plotting; return; end
-            % self.plotSurfFun;
+            self.plotSurfFun;
 
-            self.plotDimensionsReducedWrapper; 
+            % self.plotDimensionsReducedWrapper; 
 
         end
 
@@ -1157,7 +1157,7 @@ classdef sourceLocalizer < handle
             self.sourceLocalizationResults.paramStruct.distanceThresh = distanceThresh;
             self.sourceLocalizationResults.paramStruct.perceivedActualCutoff = perceivedActualCutoff;
 
-            self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
+            % self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
 
             self.sourceLocalizationResults.paramStruct.originalSize = lengthData; 
 
