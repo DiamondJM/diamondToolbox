@@ -16,6 +16,7 @@ sMean = mean(abs(s),2);
 
 if ~plotting; return; end 
 
+figure; 
 plot(f,sMean)
 hold on
 plot([60 60],ylim,'k:'); plot([120 120],ylim,'k:'); 
