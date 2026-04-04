@@ -1388,6 +1388,8 @@ classdef electrodeLocalizer < handle
             self.leads = table(chanNames_out, xyz(:,1), xyz(:,2), xyz(:,3), types_out, ...
                 'VariableNames', {'chanName','x','y','z','type'});
 
+            self.chanNames = chanNames_out;  % narrow to placed contacts only
+
             clustFile = fullfile(self.locDirs.ct_1_xfm, 'clusters_mr.mat');
             clusters_mm = xyz;                                       %#ok<NASGU>
             save(clustFile, 'clusters_mm');
