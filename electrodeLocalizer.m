@@ -725,9 +725,14 @@ classdef electrodeLocalizer < handle
                 % (AFNI 26.x) does not block MATLAB indefinitely.
                 % align_epi_anat.py writes *_mat.aff12.1D BEFORE calling 3dNotes,
                 % so we poll for that file instead of waiting for shell exit.
-                logFile = fullfile(workDir, 'align_log.txt');
+                % Expand ~ before building the shell command: the shell does not
+                % expand tilde inside double quotes, so "~/path" is treated as
+                % a literal path starting with the '~' character, causing the
+                % redirect to fail silently when rootFolder contains a tilde.
+                workDirShell = strrep(workDir, '~', getenv('HOME'));
+                logFile = fullfile(workDirShell, 'align_log.txt');
                 unix(sprintf('bash "%s" %s ct_implant "%s" RAI %s > "%s" 2>&1 &', ...
-                    alignScript, mrStem, workDir, cost, logFile));
+                    alignScript, mrStem, workDirShell, cost, logFile));
 
                 fprintf('[Stage 5] Running align_epi_anat.py (polling every 15 s) .');
                 t0_align = tic; alignTimeout = 3600;
