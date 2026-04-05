@@ -15,10 +15,7 @@ classdef sourceLocalizer < handle
         seqResults = struct('seriesAll',[],'timesAll',[],'startEndTime',[]);
         sensors
 
-        seizureProcessingResults = struct;
-
         sourceLocalizationResults = struct('localizationResults',[],'roiResults',[],'paramStruct',struct());
-        localizationMode = 'spikes'; % or seizures
 
         deltaPosition
 
@@ -183,6 +180,29 @@ classdef sourceLocalizer < handle
                 size(ts,1), nCh, Fs);
         end
 
+        function disposeOfBadSegment(self)
+
+            subjDir = fullfile(self.electrodeLocalizer.rootFolder,self.electrodeLocalizer.subj,sprintf('%s.mat','badData'));
+            load(subjDir,'badData'); % In minutes
+
+            for ii = 1:size(badData.badInterval,1)
+                thisBadInterval = badData.badInterval(ii,:); 
+                thisBadInterval = [thisBadInterval(1) * 60 * self.Fs thisBadInterval(2) * 60 * self.Fs];
+                thisBadInterval(1) = max(1,thisBadInterval(1)); 
+                thisBadInterval(2) = min(size(self.timeSeries,1),thisBadInterval(2)); 
+                
+                thisBadInterval = thisBadInterval(1) : thisBadInterval(2); 
+
+                self.timeSeries(thisBadInterval,:) = nan; 
+            end
+
+
+
+
+        end
+
+
+
         %% Property setters
 
         function set.timeSeries(self, val)
@@ -274,12 +294,12 @@ classdef sourceLocalizer < handle
             plotting = p.Results.plotting;
             forceNew = p.Results.forceNew;
 
-            self.prepareDeltaPosition('forceNew',forceNew); % Differential handling for spikes and seizures
+            self.prepareDeltaPosition('forceNew',forceNew);
 
             %% Onto localization
 
-            self.localizationFunction('forceNew',forceNew); % Spikes or seizure agnostic call
-            self.locDataToRoi;
+            self.localizationFunction('forceNew',forceNew);
+            self.locDataToRoi('forceNew',forceNew);
 
             %% Plot
 
@@ -299,68 +319,17 @@ classdef sourceLocalizer < handle
 
             if ~forceNew && ~isempty(self.deltaPosition); return; end
 
-            switch self.localizationMode
-                case 'spikes'
-                    %% Preamble
+            % Define parameters
+            self.sourceLocalizationResults.paramStruct = struct(...
+                'propagationSpeed',.05,... % mm / s
+                'sensorDistance',100,... mm
+                'subsensorLength',3,...
+                'distanceThresh', 150); % mm
 
-                    % Define parameters
-                    self.sourceLocalizationResults.paramStruct = struct(...
-                        'propagationSpeed',300,... % mm / s
-                        'sensorDistance',30,... mm
-                        'subsensorLength',3,...
-                        'distanceThresh', 30); % mm
-
-                    % These are defaults and can be adjusted.
-                    % propagationSpeed is in mm/s and refers to speed of wave
-                    % propagation.
-
-                    % sensorDistance is in mm. This is the distance sensors are apart
-                    % from each other.
-
-                    % subsensorLength = 3;
-                    % How many electrodes at a time (at minimum) should participate in
-                    % source localization.
-
-                    % Here, since we're doing localization wtih spikes, 
-                    % sensorDistance can basically be as far apart as we'd like, barring
-                    % concerns for the distance at which the signal can travel.
-                    % We do NOT have aliasing concerns like we did previously.
-                    % Before, a large sensorDistance meant that we required very low
-                    % frequencies, otherwise we'd have spatial aliasing.
-                    % Here, interictal sourceLoc are rare (rather than periodic) events. We assume
-                    % they arrive rarely, and so aliasing is not an issue. Since frequency of
-                    % these events are taken to be ~0, there's no upper limit on inter-sensor
-                    % distance (as dictated by frequency).
-
-                    % Populate spikes
-                    self.populateSpikes;
-
-                    % Compute sequences
-                    self.computeSequences;
-
-                    self.getSensors;
-
-                    %% Collect series
-
-                    self.spikeSequenceToDeltaPosition;
-
-                case 'seizure'
-
-                    % Define parameters
-                    self.sourceLocalizationResults.paramStruct = struct(...
-                        'propagationSpeed',300,... % mm / s
-                        'sensorDistance',12,... mm
-                        'subsensorLength',4,...
-                        'distanceThresh', 30); % mm
-
-                    self.extractPhasePower;
-                    self.postProcessPhase;
-
-                    self.getSensors;
-
-                    self.phaseToDeltaPosition;
-
-            end
+            self.populateSpikes('forceNew',forceNew);
+            self.computeSequences('forceNew',forceNew);
+            self.getSensors; % Should be lightweight; always re-compute 
+            self.spikeSequenceToDeltaPosition; %  Should be lightweight; always re-compute 
 
         end
 
@@ -377,24 +346,18 @@ classdef sourceLocalizer < handle
             if ~isempty(self.spikeDetectionResults.rasters) && ~forceNew; return; end
 
             assert(~isempty(self.timeSeries),'Time series empty.'); 
-            %  Please assign timeSeries and Fs directly after construction:
-            %       sl.timeSeries = myData;   % [samples x channels]
-            %       sl.Fs         = 1000;     % Hz
-            %   or load from a file via dialog (.mat, .edf, .fif):
-            %       sl.loadTimeSeries()
-            %   Then call sl.localizationManager().
 
-            self.timeSeries = zscore(self.timeSeries);
+            self.timeSeries = zScore_omitNan(self.timeSeries);
+            fprintf('Z-scoring time series. \n'); 
 
             %% Define parameters
 
             self.spikeDetectionResults.paramStruct = struct(...
-                'seqWin',0.1,... seconds
-                'maxNegPeakWidth',0.05,... seconds
-                'peakWin', 0.1, ... % seconds
-                'ampScale',3,... z
-                'trackPeaks',false,...
-                'zThresh',3);
+                'seqWin',20 * 60,... 20 minutes, in seconds
+                'maxNegPeakWidth',20 * 60,... % 20 minutes, in seconds 
+                'peakWin',10 * 60,... % 10 minutes, in seconds 
+                'zThresh',1,... % Sigma
+                'ampScale',3); % Sigma  
 
             fprintf('Calling spike detector with the following parameters. These are adjustable.\n');
             disp(self.spikeDetectionResults.paramStruct);
@@ -430,38 +393,37 @@ classdef sourceLocalizer < handle
 
             % Kill the input parser
 
-            maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth;
-            maxPosPeakWidth = Inf;
-            trackPeaks = self.spikeDetectionResults.paramStruct.trackPeaks;
-            ampScale = self.spikeDetectionResults.paramStruct.ampScale;
-            peakSeparation = 0;
-            maxPeakHeight = Inf;
+            maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth * self.Fs; % Samples
+            peakWin = self.spikeDetectionResults.paramStruct.peakWin * self.Fs; % Samples
+            zThresh = self.spikeDetectionResults.paramStruct.zThresh; 
+            ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
+
             ctsThresh = 0;
-            zThresh = self.spikeDetectionResults.paramStruct.zThresh;
-            peakWin = self.spikeDetectionResults.paramStruct.peakWin;
 
             % If you choose to mess around with ctsThresh or other
             % 'non-reported' parameters, feel free to pass them back with
             % self.spikeDetectionResults.paramStruct.
 
-            if trackPeaks
-                posPeakSeparation = peakSeparation; negPeakSeparation = 0;
-                posPeakHeight = zThresh; negPeakHeight = 0;
-            else
-                negPeakSeparation = peakSeparation; posPeakSeparation = 0;
-                posPeakHeight = 0; negPeakHeight = zThresh;
-            end
+            % negPeakSeparation = 5 * 60 * self.Fs; % Samples
+            negPeakSeparation = self.spikeDetectionResults.paramStruct.seqWin * self.Fs; % Samples
+            % I think this is the same paradigm I used in the spikes. 
+            % negPeakSeparation should be equal to (or I guess greater
+            % than) seqWin. The rationale is that we don't want the same
+            % electrode registering multiple times in the same sequence.
+            % Such information can't be processed by our algorithm. 
+
+            % So by establishing seqWin we're effectively committing to
+            % disposing of double spikes captured in this window. 
+
+            % There's discussion in computeSequences that may be
+            % applicable.
 
             %% load data and set up parameters/arrays
 
             thisTs = self.timeSeries;
             tsDims = size(thisTs);
 
-            peakWinSamples = floor(peakWin*self.Fs); % window around peak; samples
-            maxNegPeakWidth = maxNegPeakWidth * self.Fs; % Samples
-
-            %% find peaks based on polarity
-
+            %% Find peaks
 
             fullRaster = sparse(tsDims(1),tsDims(2));
             waveformsMaster = cell(1,tsDims(2));
@@ -477,13 +439,13 @@ classdef sourceLocalizer < handle
                 %% Peaks and troughs
 
                 xCurrent = thisTs(:,kk);
-                [pHeight,pInd]=findpeaks(xCurrent,'MinPeakprominence',zThresh,'MinPeakHeight',posPeakHeight,'MaxPeakWidth',maxPosPeakWidth,'minPeakDistance',posPeakSeparation);
+                [pHeight,pInd] = findpeaks(xCurrent,'MinPeakHeight',zThresh,'MinPeakHeight',0); 
 
-                isBad = pHeight > maxPeakHeight;
-                pHeight(isBad) = [];
-                pInd(isBad) = [];
+                % isBad = pHeight > maxPeakHeight;
+                % pHeight(isBad) = [];
+                % pInd(isBad) = [];
 
-                [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakProminence',zThresh,'MinPeakHeight',negPeakHeight,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
+                [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakHeight',zThresh,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
 
                 isBad = false(size(nHeight));
                 nHeight(isBad) = [];
@@ -505,9 +467,9 @@ classdef sourceLocalizer < handle
 
                     matchingMatrix = pInd - nIndBuffer(:,ii)';
 
-                    % inds = matchingMatrix >= -hp & matchingMatrix < 0;
+                    % inds = matchingMatrix >= -peakWin & matchingMatrix < 0;
                     % The above -- for up-deflection to come before down-deflection.
-                    inds = matchingMatrix >= -peakWinSamples & matchingMatrix <= peakWinSamples;
+                    inds = matchingMatrix >= -peakWin & matchingMatrix <= peakWin;
 
                     [pFind,nFind] = find(inds);
 
@@ -517,52 +479,32 @@ classdef sourceLocalizer < handle
                     end
 
                     nFind = nFind(heightMatrix);
-                    pFind = pFind(heightMatrix);
+                    % pFind = pFind(heightMatrix);
 
-                    % Waveform
-                    if trackPeaks
-                        for jj = 1:length(pFind)
-                            ts = nan(1,2 * peakWinSamples + 1);
-                            % tsBb = ts;
+                    for jj = 1:length(nFind)
 
-                            startInd = max(pInd(pFind(jj)) - peakWinSamples,1);
-                            startBuffer = max(-(pInd(pFind(jj)) - peakWinSamples) + 2,1);
+                        ts = nan(1,2 * peakWin + 1);
+                        % I'll start by filling this with NaNs, for the rare event that
+                        % we have spikes at the very beginning of the time series.
+                        % tsBb = ts;
 
-                            endInd = min(pInd(pFind(jj)) + peakWinSamples,tsDims(1));
-                            endBuffer = min(peakWinSamples-(pInd(pFind(jj))-tsDims(1)) + 1,2 * peakWinSamples + 1);
-                            % ts = xCurrent(pInd(pFind(jj))- hp:pInd(pFind(jj)) + hp);
-                            ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
-                            waveforms{pInd(pFind(jj))} = ts;
-                        end
-                    else
-                        for jj = 1:length(nFind)
+                        startInd = max(nIndBuffer(nFind(jj),ii) - peakWin,1);
+                        startBuffer = max(-(nIndBuffer(nFind(jj),ii) - peakWin) + 2,1);
 
-                            ts = nan(1,2 * peakWinSamples + 1);
-                            % I'll start by filling this with NaNs, for the rare event that
-                            % we have spikes at the very beginning of the time series.
-                            % tsBb = ts;
+                        endInd = min(nIndBuffer(nFind(jj),ii) + peakWin,tsDims(1));
+                        endBuffer = min(peakWin-(nIndBuffer(nFind(jj),ii)-tsDims(1)) + 1,2 * peakWin + 1);
+                        ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
 
-                            startInd = max(nIndBuffer(nFind(jj),ii) - peakWinSamples,1);
-                            startBuffer = max(-(nIndBuffer(nFind(jj),ii) - peakWinSamples) + 2,1);
+                        % clf; plot(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp,ts); hold on
+                        % plot(nIndBuffer(nFind(jj),ii),xCurrent(nIndBuffer(nFind(jj),ii)),'ro')
+                        % plot(pInd(pFind(jj)),xCurrent(pInd(pFind(jj))),'bo');
+                        % pause
 
-                            endInd = min(nIndBuffer(nFind(jj),ii) + peakWinSamples,tsDims(1));
-                            endBuffer = min(peakWinSamples-(nIndBuffer(nFind(jj),ii)-tsDims(1)) + 1,2 * peakWinSamples + 1);
-                            % ts = xCurrent(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp);
-                            ts(startBuffer:endBuffer) = xCurrent(startInd:endInd);
-
-                            %             clf; plot(nIndBuffer(nFind(jj),ii)- hp:nIndBuffer(nFind(jj),ii) + hp,ts); hold on
-                            %             plot(nIndBuffer(nFind(jj),ii),xCurrent(nIndBuffer(nFind(jj),ii)),'ro')
-                            %             plot(pInd(pFind(jj)),xCurrent(pInd(pFind(jj))),'bo');
-                            % pause
-
-                            waveforms{nIndBuffer(nFind(jj),ii)} = ts;
-
-                        end
+                        waveforms{nIndBuffer(nFind(jj),ii)} = ts;
                     end
 
-                    if trackPeaks; currentRaster(pInd(pFind)) = true; % To retain peaks
-                    else; currentRaster(nIndBuffer(nFind,ii)) = true;
-                    end
+                    currentRaster(nIndBuffer(nFind,ii)) = true;
+
 
                 end
                 waveforms(~currentRaster) = [];
@@ -571,20 +513,21 @@ classdef sourceLocalizer < handle
 
                 fullRaster(:,kk) = currentRaster;
 
-            end
 
-            %% Narrow by counts
+            end
 
             badCounts = sum(fullRaster) < ctsThresh;
             fullRaster(:,badCounts) = false;
 
+
             %% Volume conduction
 
-            [fullRaster,waveformsMaster] = self.removeVolCond_fromRaster(fullRaster,waveformsMaster);
+            fullRaster = self.removeVolCond_fromRaster(fullRaster);
 
             %% Pack up
 
             self.spikeDetectionResults.rasters = fullRaster;
+            self.spikeDetectionResults.Fs = self.Fs; % Downsampled
             self.spikeDetectionResults.waveforms = waveformsMaster;
 
         end
@@ -616,11 +559,15 @@ classdef sourceLocalizer < handle
             % = 0.1 s.
 
             seqWinSamples = ceil(self.spikeDetectionResults.paramStruct.seqWin * self.Fs);  % Samples
-            overlapSamples = floor(seqWinSamples / 2);
+            % overlapSamples = floor(seqWinSamples / 2);
+            overlapSamples = floor(seqWinSamples * (3/4));
 
             rasters = self.spikeDetectionResults.rasters;
 
-            if isempty(rasters); return; end % Bad session
+            if isempty(rasters)
+                self.seqResults = struct('seriesAll',[],'timesAll',[]);
+                return; 
+            end % Bad session
 
             totalWindows = buffer(1:size(rasters,1),seqWinSamples,overlapSamples,'nodelay');
 
@@ -713,9 +660,11 @@ classdef sourceLocalizer < handle
 
                     % Force to choose a value
                     vals = totalWindows(row(c==ii),hasSeries(jj));
-                    if length(vals) > 1; fprintf('Warning: duplicate time value found.\n'); end
-                    % This shouldn't happen in light of the peakSeparation value being
-                    % set.
+                    if length(vals) > 1 
+                        fprintf('Warning: duplicate time value found.\n'); 
+                        % This shouldn't happen in light of the peakSeparation value being
+                        % set.
+                    end
                     [~, ind] = min(abs(vals-median(vals)));
                     currentTimes(ii) = vals(ind);
                 end
@@ -859,137 +808,7 @@ classdef sourceLocalizer < handle
 
         end
 
-        %% Ancillary functions for seizure localization
-
-        function extractPhasePower(self)
-
-            assert(exist('seizureWindowFilt','file'),'This file should exist in diamondToolbox/Utilities/Filt. Please check paths.');
-
-            thisFilter = @seizureWindowFilt;
-            self.sourceLocalizationResults.paramStruct.filter = thisFilter;
-            thisFilter = thisFilter();
-
-            filtData = filtfilt(thisFilter.Numerator,1,self.timeSeries);
-            hilbertData = hilbert(filtData);
-            phase = angle(hilbertData);
-
-            freqData = self.Fs * diff(unwrap(phase)) / (2 * pi);
-            freqData = medfilt1(freqData,1000,'truncate');
-            freqData(end + 1,:) = freqData(end,:);
-
-            %% Process and pack
-
-            pow = abs(hilbertData);
-            realData = real(filtData);
-
-            self.seizureProcessingResults.phase = phase;
-            self.seizureProcessingResults.pow = pow;
-            self.seizureProcessingResults.freq = freqData;
-            self.seizureProcessingResults.real = realData;
-
-        end
-
-        function postProcessPhase(self)
-
-            %%%%%%
-            % Now post-process this data in such a way as to only pick the good data
-            %%%%%
-
-            % quantileVal = 0.10;
-
-            phase = self.seizureProcessingResults.phase;
-            pow = self.seizureProcessingResults.pow;
-
-            retainChans = 14;
-
-            for jj = 1:size(phase,1)
-
-                currentPow = pow(jj,:);
-                [~, ind] = sort(currentPow,'descend');
-
-                lowPowInds = ind(retainChans + 1:end);
-
-                phase(jj,lowPowInds) = nan;
-            end
-
-            pow(isnan(phase)) = nan;
-
-            fprintf('%.f percent of all phase data will be used. \n',sum(~isnan(phase(:))) / numel(phase) * 100);
-
-            self.seizureProcessingResults.phase = phase;
-            self.seizureProcessingResults.pow = pow;
-
-            self.sourceLocalizationResults.paramStruct.retainChans = retainChans;
-
-        end
-
-        function phaseToDeltaPosition(self)
-
-            %% Preamble
-
-            freqMaster = self.seizureProcessingResults.freq;
-            phaseMaster = self.seizureProcessingResults.phase;
-            sensorInds = self.sensors.sensorInds;
-
-            freqMean = mean(freqMaster,2,'omitnan');
-
-            % Let's find a bound on frequency difference informed by the doppler
-            % effect.
-            propagationSpeed = self.sourceLocalizationResults.paramStruct.propagationSpeed;
-            expectedSourceSpeed = 20;
-            acceptibleRatio = (propagationSpeed + expectedSourceSpeed) / (propagationSpeed - expectedSourceSpeed);
-
-            lengthTs = size(self.seizureProcessingResults.phase,1);
-            self.sourceLocalizationResults.paramStruct.acceptibleRatio = acceptibleRatio;
-
-            propagationSpeed = self.sourceLocalizationResults.paramStruct.propagationSpeed;
-
-            deltaPositionLocal = nan(size(sensorInds,1),lengthTs);
-
-            for ii = 1:size(sensorInds,1)
-                currentSensor = sensorInds(ii,:);
-
-                currentPhase = phaseMaster(:,currentSensor);
-                currentFreq = freqMaster(:,currentSensor);
-
-                validInds = all(~isnan(currentPhase),2);
-
-                [s,l] = bounds(currentFreq,2);
-                similarFreqLog = l ./ s < acceptibleRatio;
-
-                validInds = validInds & similarFreqLog;
-
-                currentPhase = currentPhase(validInds,:);
-                % currentFreq = currentFreq(validInds,:);
-                currentFreq = freqMean(validInds);
-                currentFreq = repmat(currentFreq,1,2);
-
-                % currentPhase = unwrap(currentPhase,[],2);
-                % Correct, but slower
-
-                for jj = 1:size(currentPhase,1)
-                    phaseRange = [-2 * pi + currentPhase(jj,2) currentPhase(jj,2) 2 * pi + currentPhase(jj,2)];
-                    [~,ind] = min(abs(currentPhase(jj,1) - phaseRange));
-                    currentPhase(jj,2) = phaseRange(ind);
-                end
-
-                currentPhase = currentPhase - mean(currentPhase,2);
-                % Center around 0 
-
-                deltaPositionLocal(ii,validInds) = -(currentPhase(:,1) * propagationSpeed ./ (2 * pi * currentFreq(:,1)) ...
-                    - currentPhase(:,2) * propagationSpeed ./ (2 * pi * currentFreq(:,2)));
-
-                % Positive distance --> currentSensor(1) is CLOSER than sensor(2)
-
-            end
-
-            self.deltaPosition = deltaPositionLocal;
-
-            fprintf('Finished computing deltaPosition, for seizure, subject %s. \n%.f percent of all computed phase differences used. \n',self.subj, sum(~isnan(deltaPositionLocal(:))) / numel(deltaPositionLocal) * 100);
-
-        end
-
-        %% Generic (spike or seizure) functions for setting up brain anatomy and electrode utilization
+        %% Generic functions for setting up brain anatomy and electrode utilization
 
         function getSensors(self)
 
@@ -1405,11 +1224,11 @@ classdef sourceLocalizer < handle
 
             %% Quality control?
 
-            localizationResults(:,isnan(localizationResults(1,:))) = []; 
-
-            qualityControlThresh = 10; % mm;
-            badInds = localizationResults(2,:) > qualityControlThresh;
-            localizationResults(:,badInds) = [];
+            % localizationResults(:,isnan(localizationResults(1,:))) = []; 
+            % 
+            % qualityControlThresh = 10; % mm;
+            % badInds = localizationResults(2,:) > qualityControlThresh;
+            % localizationResults(:,badInds) = [];
 
             %% Pack up
 
@@ -1419,13 +1238,12 @@ classdef sourceLocalizer < handle
             self.sourceLocalizationResults.paramStruct.distanceThresh = distanceThresh;
             self.sourceLocalizationResults.paramStruct.perceivedActualCutoff = perceivedActualCutoff;
 
-            self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
+            % self.sourceLocalizationResults.paramStruct.qualityControlThresh = qualityControlThresh;
 
             self.sourceLocalizationResults.paramStruct.originalSize = lengthData; 
 
             self.sourceLocalizationResults.paramStruct.meta.subj = self.subj; 
-            self.sourceLocalizationResults.paramStruct.meta.localizationMode = self.localizationMode;
-            % Others? 
+            % Others?
 
         end
 
@@ -1442,15 +1260,7 @@ classdef sourceLocalizer < handle
 
             if ~forceNew && ~isempty(self.sourceLocalizationResults.roiResults); return; end
 
-            if isequal(self.localizationMode,'spikes'); assert(~timeWindow);
-            elseif isequal(self.localizationMode,'seizure') && ~timeWindow
-                fprintf('\n%s\n', repmat('%', 1, 70));
-                fprintf('NOTE: You are localizing with seizures, but timeWindow was passed\n');
-                fprintf('as 0. This is perfectly reasonable, but if you''d like to call\n');
-                fprintf('plotSurfFun and watch a video of the seizure as it unfolds over\n');
-                fprintf('time, pass in timeWindow = 1 (in seconds) or any other value.\n');
-                fprintf('%s\n\n', repmat('%', 1, 70));
-            end
+            assert(~timeWindow);
 
             self.localizationFunction; % Needs to be done; no need to pass forceNew;
 
@@ -1460,6 +1270,7 @@ classdef sourceLocalizer < handle
             sumEmpty = 0;
 
             thisLocalizationResults = self.sourceLocalizationResults.localizationResults;
+            assert(~isempty(thisLocalizationResults),'No data to plot.');
 
             % lengthTs = size(thisLocalizationResults,2);
             lengthTs = self.sourceLocalizationResults.paramStruct.originalSize;
@@ -1550,19 +1361,36 @@ classdef sourceLocalizer < handle
         end
 
         function [maxRoic,roicTable] = findTopRoic(self)
+
             vertexMap = self.sourceLocalizationResults.roiResults.vertexMap{1};
             roicTable = zeros(length(vertexMap),3);
-            if isempty(vertexMap); maxRoic = nan; return; end
+
+            if isempty(vertexMap)
+                maxRoic = nan;
+                return
+            end
+
+            %%
+
             mapKeys = cell2mat(vertexMap.keys);
             for ii = 1:length(mapKeys)
                 roiStruct = vertexMap(mapKeys(ii));
+
                 roicTable(ii,1) = mapKeys(ii);
                 roicTable(ii,2) = roiStruct.count;
+
                 if isfield(roiStruct,'times'); roicTable(ii,3) = mean(roiStruct.times); end
+
             end
+
+            %%
+
             [~,inds] = sort(roicTable(:,2),'descend');
             roicTable = roicTable(inds,:);
+
             maxRoic = roicTable(1,1);
+
+
         end
 
         function plotSurfFun(self)
@@ -1574,16 +1402,7 @@ classdef sourceLocalizer < handle
 
             %% Preamble
 
-            currentEl = -90;
-
-            %%%%
-            % For seizure source info
-            %%%%
-
             [myBd, myBp] = self.retrieveBraindata;
-
-            isLeftInds = self.geodesic.isLeftInds;
-            useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
 
             %% Brain plot
 
@@ -1595,11 +1414,16 @@ classdef sourceLocalizer < handle
             figure
             myBd.ezplot(myBp,gca); % If we would not like to include the resection territory
             % plotResectionSurf(myStruct) % If we would like to include the resection territory
-            if useLeft; view(-90,currentEl);
-            else; view(90,currentEl);
-            end
-            myBp.camlights(5);
-            ax = gca;
+            % self.electrodeLocalizer.viewLeads('style','opaque'); 
+
+
+            view(0,90);
+            % myBp.camlights(5);
+            % ax = gca;
+
+            
+            leadLocs = readtable(self.braindata.myBd.filepaths.leads_xyz);
+            myBp.plotPoint(leadLocs,'color',[0 0 1]); 
 
             %%  Grab and set up ROI results
 
@@ -1674,14 +1498,6 @@ classdef sourceLocalizer < handle
                 [1 0 0; 0 0 1; 0 1 0],... coronal 
                 [0 0 1; 1 0 0; 0 1 0]}; %  sagittal
 
-            if isequal(self.localizationMode,'seizure') && isequal(colorMode,'auto')
-                fprintf('\n%s\n', repmat('%', 1, 70));
-                fprintf('HINT: Try passing ''colorMode'',''heatmap'' to view results in\n');
-                fprintf('terms of localization density, rather than in terms of timing.\n');
-                fprintf('%s\n\n', repmat('%', 1, 70));
-            end
-
-
             for ii = 1:length(useMatrices)
 
                 subplot(1,length(useMatrices),ii) 
@@ -1745,26 +1561,8 @@ classdef sourceLocalizer < handle
             % countVals = normalizeToBounds(inRange,[15 50],[1 108]); warning('Scaling.');
             countVals = normalizeToBounds(inRange,[15 50]);
 
-            % locMode = self.sourceLocalizationResults.paramStruct.meta.localizationMode; 
-            locMode = self.localizationMode; 
-
             if isequal(colorMode,'auto')
-
-                switch locMode
-                    case 'spikes'; colorMode = 'heatmap'; 
-                    case 'seizure'; colorMode = 'timing'; 
-                end
-                if isequal(locMode,'seizure')
-                    st = dbstack; 
-                    if ~isequal(st(2).name,'sourceLocalizer.plotDimensionsReducedWrapper')
-                        fprintf('\n%s\n', repmat('%', 1, 70));
-                        fprintf('HINT: Try passing ''colorMode'',''heatmap'' to view results in\n');
-                        fprintf('terms of localization density, rather than in terms of timing.\n');
-                        fprintf('%s\n\n', repmat('%', 1, 70));
-                    end
-                end
-            elseif isequal(colorMode,'timing')
-                if isequal(locMode,'spikes'); warning('Spike localization results will be colored according to timing, but timing is probably meaningless, since you''re considering IED localization.'); end                % timing mode intended for seizures. 
+                colorMode = 'heatmap';
             end
 
             switch colorMode
@@ -1823,11 +1621,6 @@ classdef sourceLocalizer < handle
             yticklabels({sprintf('%s',d0{2,1}), sprintf('%s',d1{2,1})});
 
         end
-
-
-        % -----------------------------------------------------------------
-        %% Staggered time series viewer
-        % -----------------------------------------------------------------
 
         function plotTimeSeries(self, varargin)
             % Staggered multi-channel time series viewer with mini overview and drag scroll.
@@ -2100,6 +1893,62 @@ classdef sourceLocalizer < handle
 
         end
 
+        function downsampleTs(self, varargin)
+        % DOWNSAMPLETS  Downsample, artifact-reject, and baseline-correct timeSeries in-place.
+        %
+        % Usage:
+        %   sl.downsampleTs()
+        %   sl.downsampleTs('targetFs', 10, 'zThresh', 10, 'medFiltMin', 30)
+        %
+        % Steps (in order):
+        %   1. Linearly interpolate samples where |z-score| > zThresh (on full-res data)
+        %   2. Resample to targetFs (resample() applies anti-aliasing lowpass internally)
+        %   3. Subtract per-channel moving median to remove slow baseline drift
+        %
+        % Overwrites sl.timeSeries and updates sl.Fs.
+        %
+        % Parameters:
+        %   targetFs    - target sample rate in Hz              (default 1)
+        %   zThresh     - artifact z-score threshold            (default 10; [] = skip)
+        %   medFiltMin  - median filter window in minutes       (default 30; [] = skip)
+
+            p = inputParser;
+            addParameter(p, 'targetFs',   1);
+            addParameter(p, 'medFiltMin', 30);
+            parse(p, varargin{:});
+            targetFs   = p.Results.targetFs;
+            medFiltMin = p.Results.medFiltMin;
+
+            assert(~isempty(self.timeSeries), ...
+                '[downsampleTs] timeSeries is empty — load data first.');
+            assert(~isempty(self.Fs) && self.Fs > 0, ...
+                '[downsampleTs] Fs not set.');
+            assert(targetFs < self.Fs, ...
+                '[downsampleTs] targetFs (%.4g) must be less than current Fs (%.4g).', targetFs, self.Fs);
+
+            ts = double(self.timeSeries);
+            Fs = self.Fs;
+
+            % Downsample
+            [p_r, q_r] = rat(targetFs / Fs);
+            FsOld = Fs;
+            ts = resample(ts, p_r, q_r);
+            Fs = FsOld * p_r / q_r;
+            fprintf('[downsampleTs] Downsampled from %.4g Hz to %.4g Hz → %d samples.\n', ...
+                FsOld, Fs, size(ts, 1));
+
+            % Median filter baseline removal
+            if ~isempty(medFiltMin)
+                winSamp = 2*floor(medFiltMin * 60 * Fs / 2) + 1;  % must be odd
+                fprintf('[downsampleTs] Removing baseline with %.0f-min median filter.\n', medFiltMin);
+                for c = 1:size(ts,2)
+                    ts(:,c) = ts(:,c) - medfilt1(ts(:,c), winSamp);
+                end
+            end
+
+            self.timeSeries = ts;
+            self.Fs = Fs;
+        end
 
     end
 
@@ -2161,7 +2010,7 @@ classdef sourceLocalizer < handle
 
         end
 
-        function [rasters,waveforms] = removeVolCond_fromRaster(rasters,waveforms)
+        function rasters = removeVolCond_fromRaster(rasters)
 
             listLocs = cell(1,size(rasters,2));
 
@@ -2179,7 +2028,7 @@ classdef sourceLocalizer < handle
             for ii = 1:length(listLocs)
                 isBad = ismember(listLocs{ii},volCondInds);
                 rasters(listLocs{ii}(isBad),ii) = false;
-                waveforms{ii}(isBad,:) = [];
+                % waveforms{ii}(isBad,:) = [];
             end
 
         end
@@ -2492,6 +2341,7 @@ classdef sourceLocalizer < handle
                     error('[sourceLocalizer] Unsupported format: %s. Use .mat, .edf, or .fif.', ext);
             end
         end
+
 
         function [ts, Fs, chanNames] = loadTsFromMat(fullPath)
             % Load time series from a .mat file.
