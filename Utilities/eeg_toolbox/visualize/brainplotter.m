@@ -507,7 +507,7 @@ classdef brainplotter < handle
 
             ip = inputParser;
             ip.addParameter('plot3', 0);
-            ip.addParameter('color', repmat([0 1 0], n, 1));
+            ip.addParameter('color', repmat([0 0 1], n, 1));
             ip.addParameter('radius', 1.5, @isnumeric);
             ip.addParameter('legend', []);
             ip.addParameter('ctNum', [], @isnumeric);
@@ -712,12 +712,12 @@ classdef brainplotter < handle
             if ischar(label) && ~iscellstr(label), label = {label}; end
             for i = 1 : length(label)
                 cam = get(gca, 'CameraPosition');
-                v = normalise(cam - xyz(i,:)); % vector from point to cam
+                v = normalize(cam - xyz(i,:)); % vector from point to cam
                 label_pos = xyz(i,:) + 2*v; % this pops label out a bit so it's visible
-%                 t = text('Position',label_pos, 'String',label{i}, 'FontSize',13, 'HorizontalAlignment','center', 'color', labelColor);
-%                 t.FontWeight = 'bold'; 
-%                 t.Parent = hgroup;
-%                 t.UserData = struct('root_xyz',xyz(i,:));
+                t = text('Position',label_pos, 'String',label{i}, 'FontSize',13, 'HorizontalAlignment','center', 'color', labelColor);
+                t.FontWeight = 'bold'; 
+                t.Parent = hgroup;
+                t.UserData = struct('root_xyz',xyz(i,:));
             end
             
             if ~isempty(legendLabel)

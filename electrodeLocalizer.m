@@ -635,7 +635,7 @@ classdef electrodeLocalizer < handle
 
             p = inputParser;
             addParameter(p, 'forceNew', false);
-            addParameter(p, 'method',   'manual');  % stroke default: manual GUI
+            addParameter(p, 'method',   'auto');    % 'auto' or 'manual'
             addParameter(p, 'cost', 'lpc');          % auto only: alignment cost function
             parse(p, varargin{:});
             forceNew = p.Results.forceNew;
@@ -1360,7 +1360,7 @@ classdef electrodeLocalizer < handle
             % ---- Main loop: slicer → 3-D review → restart or proceed ----
             markersFS = [];   % FreeSurfer RAS coords; set when user proceeds
             while true
-                markers = runSlicerGUI(markers, sortedChanNames);
+                markers = electrodeLocalizer.slicerGUI(vol, info, self.subj, markers, sortedChanNames);
                 if isempty(markers) && nargout == 0
                     error('electrodeLocalizer:cancelled', ...
                         '[manualLocalize] Cancelled — no markers placed.');
@@ -1369,7 +1369,7 @@ classdef electrodeLocalizer < handle
                 % contacts to the pial-outer-smoothed surface before review.
                 markersFS = ctRasToFS(markers);
                 markersFS = snapToPia(markersFS);
-                action = run3DReview(markersFS);
+                action = self.reviewGUI(markersFS);
                 if strcmp(action, 'proceed')
                     break;
                 elseif strcmp(action, 'quit')
@@ -1528,771 +1528,267 @@ classdef electrodeLocalizer < handle
                 end
             end
 
-            % ==============================================================
-            % Nested: CT slicer GUI
-            % ==============================================================
-            function markersOut = runSlicerGUI(markersIn, sortedChanNames)
+        end  % manualLocalize
 
-                % ---- State ----
-                curVox = [round(nx/2), round(ny/2), round(nz/2)];
-                wW = 3000;  wL = 700;
-                mode = 'scroll';   % 'scroll' | 'zoom'
-                dragStart    = [];  % axes data coords at drag start
-                dragStartFig = [];  % figure pixel coords at drag start
-                dragLimX     = [];
-                dragLimY     = [];
-                dragAxes     = [];
-                isDragging   = false;
-                lastAx       = [];   % last axes interacted with (for arrow-key scroll)
-                pixdim       = info.PixelDimensions;   % [dx dy dz] mm/vox
-                markersOut   = markersIn;
-                pendingPos   = [];   % voxel [ix,iy,iz] awaiting name entry
+        % -----------------------------------------------------------------
+        %% 3-D review GUI (shared by manualLocalize and pointToSurface)
+        % -----------------------------------------------------------------
 
-                % ---- Orientation flip flags (computed once, shared by all callbacks) ----
-                % These determine whether the displayed image is flipud relative to
-                % voxel index order.  Any callback that maps display coords ↔ voxels
-                % must apply the same transforms used in refreshAll.
-                colX_ = Txfm(1:3,1);  colY_ = Txfm(1:3,2);  colZ_ = Txfm(1:3,3);
-                ax_xFlip  = colX_(1) > 0;   % XDir='reverse' for axial/coronal
-                ax_yFlip  = colY_(2) < 0;   % flipud on axial y (dim2)
-                cor_xFlip = colX_(1) > 0;
-                cor_yTop  = colZ_(3) < 0;   % flipud on coronal/sagittal y (dim3)
-                sag_xFlip = colY_(2) < 0;   % XDir='reverse' for sagittal x
+        function action = reviewGUI(self, mkrs)
+            % Show placed markers on brain surface for review.
+            % Returns: 'proceed' | 'restart' | 'quit'
+            action = 'restart';
+            if isempty(mkrs), return; end
 
-                % ---- Color scheme ----
-                bg  = [0.12 0.12 0.12];
-                bg2 = [0.18 0.18 0.18];
-                bg3 = [0.22 0.22 0.22];
-                fg  = [0.92 0.92 0.92];
-                acc = [0  0.9 0.9];    % cyan accent
+            bg = [0.12 0.12 0.12];
+            fg = [0.92 0.92 0.92];
 
-                % ---- Figure ----
-                fig = figure('Name', sprintf('CT Slicer — %s', self.subj), ...
-                    'NumberTitle','off','Color',bg, ...
-                    'Position',[30 30 1500 870], ...
-                    'WindowKeyPressFcn',@cbKey, ...
-                    'WindowScrollWheelFcn',@cbScroll, ...
-                    'WindowButtonDownFcn',@cbDown, ...
-                    'WindowButtonMotionFcn',@cbMotion, ...
-                    'WindowButtonUpFcn',@cbUp, ...
-                    'CloseRequestFcn',@cbClose);
+            fig3 = figure('Name', sprintf('3-D Review — %s', self.subj), ...
+                'NumberTitle','off','Color',bg, ...
+                'Position',[100 80 1200 820], ...
+                'CloseRequestFcn',@cbQuit);
 
-                % ---- Toolbar strip (top, left 75%) ----
-                tbH  = 0.048;
-                tb1Y = 0.950;           % top row: mode buttons + hint
-                tb2Y = tb1Y - tbH - 0.006;  % bottom row: W/L controls + Reset View
+            ax3 = axes('Parent',fig3,'Position',[0.01 0.01 0.73 0.97], ...
+                'Color','k','XColor','none','YColor','none','ZColor','none');
 
-                % --- Row 1: mode + hint ---
-                uicontrol(fig,'Style','text','String','Mode:', ...
-                    'Units','normalized','Position',[0.01 tb1Y 0.04 tbH], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
-                btnNormal = uicontrol(fig,'Style','togglebutton','String','Scroll', ...
-                    'Units','normalized','Position',[0.05 tb1Y 0.07 tbH], ...
-                    'BackgroundColor',[0.25 0.55 0.25],'ForegroundColor','w', ...
-                    'FontSize',10,'Value',1,'Callback',@(~,~) setMode('scroll'));
-                btnZoom = uicontrol(fig,'Style','togglebutton','String','Zoom', ...
-                    'Units','normalized','Position',[0.13 tb1Y 0.06 tbH], ...
-                    'BackgroundColor',bg2,'ForegroundColor',fg, ...
-                    'FontSize',10,'Value',0,'Callback',@(~,~) setMode('zoom'));
-                uicontrol(fig,'Style','text', ...
-                    'String','Drag to pan  |  Click to place crosshair  |  Scroll: slice (scroll mode) / zoom (zoom mode)', ...
-                    'Units','normalized','Position',[0.20 tb1Y 0.56 tbH], ...
-                    'BackgroundColor',bg,'ForegroundColor',[0.5 0.5 0.5],'FontSize',9, ...
-                    'HorizontalAlignment','left');
+            mkrXYZ   = [[mkrs.x]', [mkrs.y]', [mkrs.z]'];
+            mkrNames = {mkrs.chanName};
+            self.renderLeadsOnAxes(ax3, mkrXYZ, mkrNames);
 
-                % --- Row 2: W/L + Reset View ---
-                uicontrol(fig,'Style','text','String','W:', ...
-                    'Units','normalized','Position',[0.01 tb2Y 0.025 tbH], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
-                hW = uicontrol(fig,'Style','edit','String',num2str(wW), ...
-                    'Units','normalized','Position',[0.038 tb2Y 0.060 tbH], ...
-                    'BackgroundColor',bg3,'ForegroundColor',fg, ...
-                    'FontSize',10,'Callback',@cbWL);
-                uicontrol(fig,'Style','text','String','L:', ...
-                    'Units','normalized','Position',[0.103 tb2Y 0.025 tbH], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
-                hL = uicontrol(fig,'Style','edit','String',num2str(wL), ...
-                    'Units','normalized','Position',[0.131 tb2Y 0.060 tbH], ...
-                    'BackgroundColor',bg3,'ForegroundColor',fg, ...
-                    'FontSize',10,'Callback',@cbWL);
-                uicontrol(fig,'Style','pushbutton','String','Reset View', ...
-                    'Units','normalized','Position',[0.20 tb2Y 0.08 tbH], ...
-                    'BackgroundColor',bg2,'ForegroundColor',fg, ...
-                    'FontSize',10,'Callback',@cbResetView);
+            rx = 0.755;  rw = 0.235;
+            uicontrol(fig3,'Style','text','String','Review Placements', ...
+                'Units','normalized','Position',[rx 0.88 rw 0.06], ...
+                'BackgroundColor',bg,'ForegroundColor',[0 0.9 0.9], ...
+                'FontSize',13,'FontWeight','bold','HorizontalAlignment','center');
+            uicontrol(fig3,'Style','text', ...
+                'String',sprintf('%d point(s) placed.\n\nDrag to rotate.\nVerify positions.\nThen Proceed.', numel(mkrs)), ...
+                'Units','normalized','Position',[rx 0.65 rw 0.22], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',11,'HorizontalAlignment','left');
+            uicontrol(fig3,'Style','pushbutton','String','Proceed', ...
+                'Units','normalized','Position',[rx 0.45 rw 0.10], ...
+                'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
+                'FontSize',13,'FontWeight','bold','Callback',@cbProceed);
+            uicontrol(fig3,'Style','pushbutton','String','Restart Slicer', ...
+                'Units','normalized','Position',[rx 0.32 rw 0.10], ...
+                'BackgroundColor',[0.40 0.20 0.10],'ForegroundColor','w', ...
+                'FontSize',12,'Callback',@cbRestart);
+            uicontrol(fig3,'Style','pushbutton','String','Quit', ...
+                'Units','normalized','Position',[rx 0.19 rw 0.10], ...
+                'BackgroundColor',[0.55 0.05 0.05],'ForegroundColor','w', ...
+                'FontSize',12,'FontWeight','bold','Callback',@cbQuit);
 
-                % ---- Slice panels ----
-                % Make panels square in pixels so DataAspectRatio fills them
-                % without black bars for isotropic CT data.
-                figPos = get(fig,'Position');   % [left bottom width height] px
-                panW = 0.235;
-                panH = panW * figPos(3) / figPos(4);  % same pixel size → square
-                panY = (tb2Y - panH) / 2 + 0.005;    % centered between bottom edge and row-2 toolbar
-                axAx  = axes('Parent',fig,'Position',[0.005 panY panW panH], ...
-                    'Color','k','XColor','none','YColor','none'); hold(axAx,'on');
-                axCor = axes('Parent',fig,'Position',[0.248 panY panW panH], ...
-                    'Color','k','XColor','none','YColor','none'); hold(axCor,'on');
-                axSag = axes('Parent',fig,'Position',[0.491 panY panW panH], ...
-                    'Color','k','XColor','none','YColor','none'); hold(axSag,'on');
+            waitfor(fig3);
 
-                % Image handles (replaced on each refresh)
-                hImAx  = []; hImCor = []; hImSag = [];
+            function cbProceed(~,~), action = 'proceed';  delete(fig3); end
+            function cbRestart(~,~), action = 'restart';  delete(fig3); end
+            function cbQuit(~,~),    action = 'quit';     if ishandle(fig3), delete(fig3); end; end
+        end
 
-                % Crosshair handles
-                hXHax  = [];  hXHcor = [];  hXHsag = [];
+        % -----------------------------------------------------------------
+        %% Point-to-surface: click any same-session MRI, get pial vertex
+        % -----------------------------------------------------------------
 
-                % Marker scatter handles
-                hMkAx  = [];  hMkCor = [];  hMkSag = [];
+        function result = pointToSurface(self, imagePath)
+            % Click one or more points on any NIfTI image and return the
+            % nearest cortical surface vertex for each.
+            %
+            % Usage:
+            %   result = el.pointToSurface()              % file dialog
+            %   result = el.pointToSurface('/path/to.nii.gz')
+            %
+            % The image should be from the same scanner session as mr_pre.nii
+            % (e.g. DWI, FLAIR, T2) so that NIfTI world (scanner RAS) coords
+            % are in the same space as the pial GIFTI surfaces.
+            %
+            % Output: struct array, one entry per placed point:
+            %   name        — point name entered by user (or auto 'Point N')
+            %   rawXYZ      — [1×3] scanner RAS mm of the clicked point
+            %   snappedXYZ  — [1×3] scanner RAS mm of nearest pial vertex
+            %   vertex      — signed vertex index: negative = left hemi, positive = right hemi
+            %                 (abs(vertex) is the 1-based index into the pial GIFTI)
+            %   hemisphere  — 'lh' or 'rh'
 
-                % Slice index labels
-                hTitleAx  = title(axAx,  '','Color',fg,'FontSize',9);
-                hTitleCor = title(axCor, '','Color',fg,'FontSize',9);
-                hTitleSag = title(axSag, '','Color',fg,'FontSize',9);
-
-                % Status bar
-                hStatus = uicontrol(fig,'Style','text', ...
-                    'Units','normalized','Position',[0.005 0.003 0.73 0.038], ...
-                    'BackgroundColor',bg,'ForegroundColor',[0.5 0.8 1.0], ...
-                    'FontSize',10,'HorizontalAlignment','left','String','Click on a contact location');
-
-                % ---- Right panel ----
-                rx = 0.742;  rw = 0.253;
-                uicontrol(fig,'Style','text','String','CT Slicer', ...
-                    'Units','normalized','Position',[rx 0.94 rw 0.05], ...
-                    'BackgroundColor',bg,'ForegroundColor',acc, ...
-                    'FontSize',14,'FontWeight','bold','HorizontalAlignment','center');
-
-                uicontrol(fig,'Style','text','String','Channel name:', ...
-                    'Units','normalized','Position',[rx 0.89 rw 0.04], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg, ...
-                    'FontSize',10,'HorizontalAlignment','left');
-                hList = uicontrol(fig,'Style','listbox', ...
-                    'Units','normalized','Position',[rx 0.68 rw 0.21], ...
-                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',11,'String',{}, ...
-                    'KeyPressFcn',@cbKey);
-                uicontrol(fig,'Style','text','String','Or type name:', ...
-                    'Units','normalized','Position',[rx 0.635 rw 0.04], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg, ...
-                    'FontSize',10,'HorizontalAlignment','left');
-                hEdit = uicontrol(fig,'Style','edit', ...
-                    'Units','normalized','Position',[rx 0.585 rw 0.048], ...
-                    'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
-                    'FontSize',11,'HorizontalAlignment','left','String','', ...
-                    'KeyPressFcn',@cbKey);
-                uicontrol(fig,'Style','text','String','Electrode type:', ...
-                    'Units','normalized','Position',[rx 0.54 rw 0.04], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg, ...
-                    'FontSize',10,'HorizontalAlignment','left');
-                hType = uicontrol(fig,'Style','popupmenu', ...
-                    'Units','normalized','Position',[rx 0.49 rw 0.048], ...
-                    'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
-                    'FontSize',11,'String',{'depth','subdural'},'Value',1);
-                hPlaceBtn = uicontrol(fig,'Style','pushbutton', ...
-                    'String','Place Marker', ...
-                    'Units','normalized','Position',[rx 0.42 rw 0.063], ...
-                    'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
-                    'FontSize',12,'FontWeight','bold','Enable','off','Callback',@cbPlace);
-
-                uicontrol(fig,'Style','text','String','Placed markers:', ...
-                    'Units','normalized','Position',[rx 0.37 rw 0.04], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg, ...
-                    'FontSize',10,'HorizontalAlignment','left');
-                hMkList = uicontrol(fig,'Style','listbox', ...
-                    'Units','normalized','Position',[rx 0.19 rw 0.18], ...
-                    'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',10,'String',{}, ...
-                    'Callback',@cbMkListClick,'KeyPressFcn',@cbKey);
-                uicontrol(fig,'Style','pushbutton','String','Remove Selected', ...
-                    'Units','normalized','Position',[rx 0.13 rw 0.056], ...
-                    'BackgroundColor',[0.48 0.18 0.18],'ForegroundColor','w', ...
-                    'FontSize',10,'Callback',@cbRemove);
-                uicontrol(fig,'Style','pushbutton','String','Quit', ...
-                    'Units','normalized','Position',[rx 0.02 rw*0.44 0.09], ...
-                    'BackgroundColor',[0.35 0.15 0.15],'ForegroundColor','w', ...
-                    'FontSize',11,'Callback',@cbQuit);
-                uicontrol(fig,'Style','pushbutton','String','Done', ...
-                    'Units','normalized','Position',[rx+rw*0.56 0.02 rw*0.44 0.09], ...
-                    'BackgroundColor',[0.20 0.38 0.58],'ForegroundColor','w', ...
-                    'FontSize',11,'FontWeight','bold','Callback',@cbDone);
-
-                refreshAll();
-                waitfor(fig);
-
-                % ---- Helpers ----
-                function setMode(m)
-                    mode = m;
-                    set(btnNormal,'Value', strcmp(m,'scroll'), ...
-                        'BackgroundColor', ternary(strcmp(m,'scroll'),[0.25 0.55 0.25],bg2));
-                    set(btnZoom,  'Value', strcmp(m,'zoom'), ...
-                        'BackgroundColor', ternary(strcmp(m,'zoom'), [0.10 0.35 0.55],bg2));
-                end
-
-                function v = ternary(cond, a, b)
-                    if cond, v = a; else, v = b; end
-                end
-
-                function addOrientLabels(ax, leftLbl, rightLbl, topLbl, botLbl)
-                    % Place orientation labels at the visual edges of ax.
-                    % Uses DATA units to avoid any ambiguity with reversed axes:
-                    % XDir='reverse' means xl(2) is the visual-left edge.
-                    prevLbls = findobj(ax,'Tag','orientLabel');
-                    if ~isempty(prevLbls), delete(prevLbls); end
-                    xl = get(ax,'XLim');  yl = get(ax,'YLim');
-                    xrev = strcmp(get(ax,'XDir'),'reverse');
-                    yrev = strcmp(get(ax,'YDir'),'reverse');
-                    % Visual-edge data coordinates.
-                    xL = xl(1 + xrev);   % xl(2) if reversed (high x = visual left)
-                    xR = xl(2 - xrev);   % xl(1) if reversed (low  x = visual right)
-                    yT = yl(2 - yrev);   % yl(2) if normal   (high y = visual top)
-                    yB = yl(1 + yrev);   % yl(1) if normal   (low  y = visual bot)
-                    % Small inset (move away from the edge, toward center).
-                    dx = 0.03*(xl(2)-xl(1)) * (1 - 2*xrev);  % +dx inward if normal, -dx if rev
-                    dy = 0.03*(yl(2)-yl(1)) * (1 - 2*yrev);
-                    txtArgs = {'Units','data','FontSize',10,'FontWeight','bold', ...
-                               'Color',[1 1 0],'HitTest','off','Tag','orientLabel', ...
-                               'Clipping','off'};
-                    text(ax, xL+dx, mean(yl), leftLbl,  txtArgs{:}, ...
-                        'HorizontalAlignment','left',  'VerticalAlignment','middle');
-                    text(ax, xR-dx, mean(yl), rightLbl, txtArgs{:}, ...
-                        'HorizontalAlignment','right', 'VerticalAlignment','middle');
-                    text(ax, mean(xl), yT-dy, topLbl,   txtArgs{:}, ...
-                        'HorizontalAlignment','center','VerticalAlignment','top');
-                    text(ax, mean(xl), yB+dy, botLbl,   txtArgs{:}, ...
-                        'HorizontalAlignment','center','VerticalAlignment','bottom');
-                end
-
-                function ax = hitAxes(pt)
-                    % pt = figure CurrentPoint [x y] pixels
-                    figPos = get(fig,'Position');
-                    np = pt ./ figPos(3:4);
-                    ax = [];
-                    for aa = [axAx, axCor, axSag]
-                        apos = get(aa,'Position');
-                        if np(1) >= apos(1) && np(1) <= apos(1)+apos(3) && ...
-                           np(2) >= apos(2) && np(2) <= apos(2)+apos(4)
-                            ax = aa;
-                            return;
-                        end
+            if nargin < 2 || isempty(imagePath)
+                filter = {'*.nii;*.nii.gz', 'NIfTI files (*.nii, *.nii.gz)'};
+                while true
+                    choice = dlgNonModal( ...
+                        {'Select a NIfTI image to point on.', ...
+                         'Any same-session acquisition works (MPRAGE, DWI, FLAIR, T2, etc.).', ...
+                         '', 'Accepted formats:  .nii  |  .nii.gz'}, ...
+                        'Point to Surface', 'Browse...', 'Cancel');
+                    if ~strcmp(choice, 'Browse...')
+                        result = []; return;
                     end
+                    [f, d] = uigetfile(filter, 'Select MRI file');
+                    if ~isequal(f, 0), break; end
+                    % file picker cancelled — loop back to description dialog
                 end
+                imagePath = fullfile(d, f);
+            end
+            assert(exist(imagePath,'file')==2, ...
+                '[pointToSurface] File not found: %s', imagePath);
 
-                function [dp, valid] = axesDataPoint(ax)
-                    cp = get(ax,'CurrentPoint');
-                    dp = cp(1,1:2);
-                    xl = get(ax,'XLim');  yl = get(ax,'YLim');
-                    valid = dp(1)>=xl(1) && dp(1)<=xl(2) && dp(2)>=yl(1) && dp(2)<=yl(2);
-                end
+            % Load pial surfaces
+            sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
+            lhFile  = fullfile(sumaDir, 'lh.pial.gii');
+            rhFile  = fullfile(sumaDir, 'rh.pial.gii');
+            assert(exist(lhFile,'file')==2 && exist(rhFile,'file')==2, ...
+                '[pointToSurface] Pial GIFTIs not found in:\n  %s\nRun recon-all + SUMA first.', sumaDir);
+            lhVerts = gifti(lhFile).vertices;   % N×3 scanner RAS
+            rhVerts = gifti(rhFile).vertices;
 
-                function refreshAll()
-                    if ~ishandle(fig), return; end
-                    clim_lo = wL - wW/2;
-                    clim_hi = wL + wW/2;
+            [vol, info] = electrodeLocalizer.loadVolume(imagePath);
 
-                    % Flip flags are computed once in the outer scope (ax_xFlip, etc.)
+            markers = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
+            result  = [];
 
-                    % ---- Axial ----
-                    sl_ax = vol(:,:,curVox(3))';
-                    if ax_yFlip, sl_ax = flipud(sl_ax); end
-                    if isempty(hImAx) || ~ishandle(hImAx)
-                        hImAx = imagesc(axAx, sl_ax, [clim_lo clim_hi]);
-                        colormap(axAx, gray);
-                        axis(axAx,'normal');
-                        set(axAx,'XLim',[0.5 nx+0.5],'YLim',[0.5 ny+0.5],'YDir','normal');
-                        if ax_xFlip, set(axAx,'XDir','reverse'); end
-                        addOrientLabels(axAx, 'R','L','A','P');
+            while true
+                % Empty chanNames → slicer auto-numbers points as "Point N"
+                markers = electrodeLocalizer.slicerGUI(vol, info, self.subj, markers, {});
+                if isempty(markers), return; end
+
+                % Marker world coords are scanner RAS from the input volume's
+                % affine.  For same-session acquisitions without repositioning
+                % this is the same physical space as the pial GIFTIs.
+                N   = numel(markers);
+                pts = struct('name',cell(1,N),'rawXYZ',cell(1,N),'snappedXYZ',cell(1,N), ...
+                             'vertex',cell(1,N),'hemisphere',cell(1,N));
+                for k = 1:N
+                    pt = [markers(k).x, markers(k).y, markers(k).z];
+                    dLH = sum((lhVerts - pt).^2, 2);
+                    dRH = sum((rhVerts - pt).^2, 2);
+                    [mLH, iLH] = min(dLH);
+                    [mRH, iRH] = min(dRH);
+                    if mLH <= mRH
+                        pts(k).hemisphere = 'lh';
+                        pts(k).vertex     = -iLH;   % negative = left hemisphere
+                        pts(k).snappedXYZ = lhVerts(iLH,:);
                     else
-                        set(hImAx,'CData',sl_ax);
-                        clim(axAx,[clim_lo clim_hi]);
+                        pts(k).hemisphere = 'rh';
+                        pts(k).vertex     = iRH;    % positive = right hemisphere
+                        pts(k).snappedXYZ = rhVerts(iRH,:);
                     end
-                    set(hTitleAx,'String',sprintf('AXIAL   z=%d/%d',curVox(3),nz));
-
-                    % ---- Coronal ----
-                    sl_cor = squeeze(vol(:,curVox(2),:))';
-                    if cor_yTop, sl_cor = flipud(sl_cor); end
-                    if isempty(hImCor) || ~ishandle(hImCor)
-                        hImCor = imagesc(axCor, sl_cor, [clim_lo clim_hi]);
-                        colormap(axCor, gray);
-                        axis(axCor,'normal');
-                        set(axCor,'XLim',[0.5 nx+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
-                        if cor_xFlip, set(axCor,'XDir','reverse'); end
-                        addOrientLabels(axCor, 'R','L','S','I');
-                    else
-                        set(hImCor,'CData',sl_cor);
-                        clim(axCor,[clim_lo clim_hi]);
-                    end
-                    set(hTitleCor,'String',sprintf('CORONAL   y=%d/%d',curVox(2),ny));
-
-                    % ---- Sagittal ----
-                    sl_sag = squeeze(vol(curVox(1),:,:))';
-                    if cor_yTop, sl_sag = flipud(sl_sag); end   % same z-flip as coronal
-                    if isempty(hImSag) || ~ishandle(hImSag)
-                        hImSag = imagesc(axSag, sl_sag, [clim_lo clim_hi]);
-                        colormap(axSag, gray);
-                        axis(axSag,'normal');
-                        set(axSag,'XLim',[0.5 ny+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
-                        if sag_xFlip, set(axSag,'XDir','reverse'); end
-                        addOrientLabels(axSag, 'P','A','S','I');
-                    else
-                        set(hImSag,'CData',sl_sag);
-                        clim(axSag,[clim_lo clim_hi]);
-                    end
-                    set(hTitleSag,'String',sprintf('SAGITTAL   x=%d/%d',curVox(1),nx));
-
-                    refreshCrosshairs();
-                    refreshMarkers();
-
-                    mm = vox2mm(curVox);
-                    set(hStatus,'String', ...
-                        sprintf('  vox [%d, %d, %d]    x=%.1f  y=%.1f  z=%.1f mm', ...
-                        curVox(1),curVox(2),curVox(3), mm(1),mm(2),mm(3)));
-
-                    % Refresh available channel names list
-                    if ~isempty(sortedChanNames)
-                        used = {markersOut.chanName};
-                        rem  = sortedChanNames(~ismember(sortedChanNames, used));
-                        set(hList,'String',rem(:), ...
-                            'Value',max(1,min(get(hList,'Value'),numel(rem))));
-                    end
+                    pts(k).rawXYZ = pt;
+                    pts(k).name   = markers(k).chanName;
                 end
 
-                function refreshCrosshairs()
-                    if ~ishandle(fig), return; end
-                    % Axial crosshair: vertical at ix, horizontal at iy.
-                    % When ax_yFlip=true, the image was flipud before display,
-                    % so voxel iy appears at display row (ny - iy + 1).
-                    iy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
-                    if ~isempty(hXHax) && all(ishandle(hXHax))
-                        delete(hXHax);
-                    end
-                    hXHax(1) = plot(axAx, [curVox(1) curVox(1)], [0.5 ny+0.5], ...
-                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-                    hXHax(2) = plot(axAx, [0.5 nx+0.5], [iy_disp iy_disp], ...
-                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-
-                    % Coronal crosshair: vertical at ix, horizontal at (flipped) iz
-                    % When cor_yTop=true the image was flipud, so voxel iz maps to display row (nz - iz + 1).
-                    iz_cor = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
-                    if ~isempty(hXHcor) && all(ishandle(hXHcor))
-                        delete(hXHcor);
-                    end
-                    hXHcor(1) = plot(axCor, [curVox(1) curVox(1)], [0.5 nz+0.5], ...
-                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-                    hXHcor(2) = plot(axCor, [0.5 nx+0.5], [iz_cor iz_cor], ...
-                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-
-                    % Sagittal crosshair: vertical at iy, horizontal at (flipped) iz
-                    if ~isempty(hXHsag) && all(ishandle(hXHsag))
-                        delete(hXHsag);
-                    end
-                    hXHsag(1) = plot(axSag, [curVox(2) curVox(2)], [0.5 nz+0.5], ...
-                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-                    hXHsag(2) = plot(axSag, [0.5 ny+0.5], [iz_cor iz_cor], ...
-                        'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
-                end
-
-                function refreshMarkers()
-                    if ~ishandle(fig), return; end
-                    if ~isempty(hMkAx)  && all(ishandle(hMkAx)),  delete(hMkAx);  end
-                    if ~isempty(hMkCor) && all(ishandle(hMkCor)), delete(hMkCor); end
-                    if ~isempty(hMkSag) && all(ishandle(hMkSag)), delete(hMkSag); end
-                    hMkAx = []; hMkCor = []; hMkSag = [];
-
-                    if isempty(markersOut), return; end
-
-                    % Convert marker world mm back to voxel for display.
-                    % vox2mm: vox_h * Txfm = mm_h  →  inverse: mm_h * inv(Txfm) = vox_h
-                    invT = inv(Txfm);
-                    for mi = 1:numel(markersOut)
-                        mm_h = [markersOut(mi).x, markersOut(mi).y, markersOut(mi).z, 1];
-                        vx   = round(mm_h * invT);   % no transpose — row-vector convention
-                        vx   = vx(1:3);
-
-                        mkCol  = [0.15 0.35 0.85];   % dark blue dot
-                        txtCol = [0.55 0.75 1.00];   % lighter blue text (readable on dark CT)
-
-                        % Axial: only show if this marker is on the current axial slice (z).
-                        if abs(vx(3) - curVox(3)) <= 1
-                            vy_disp = ternary(ax_yFlip, ny - vx(2) + 1, vx(2));
-                            hMkAx(end+1) = scatter(axAx, vx(1), vy_disp, 80, mkCol, ...
-                                'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
-                            hMkAx(end+1) = text(axAx, vx(1)+2, vy_disp, ...
-                                markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
-                                'FontWeight','bold','HitTest','off'); %#ok<AGROW>
-                        end
-
-                        % Coronal: only show if on the current coronal slice (y).
-                        iz_c = ternary(cor_yTop, nz - vx(3) + 1, vx(3));
-                        if abs(vx(2) - curVox(2)) <= 1
-                            hMkCor(end+1) = scatter(axCor, vx(1), iz_c, 80, mkCol, ...
-                                'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
-                            hMkCor(end+1) = text(axCor, vx(1)+2, iz_c, ...
-                                markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
-                                'FontWeight','bold','HitTest','off'); %#ok<AGROW>
-                        end
-
-                        % Sagittal: only show if on the current sagittal slice (x).
-                        if abs(vx(1) - curVox(1)) <= 1
-                            hMkSag(end+1) = scatter(axSag, vx(2), iz_c, 80, mkCol, ...
-                                'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
-                            hMkSag(end+1) = text(axSag, vx(2)+2, iz_c, ...
-                                markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
-                                'FontWeight','bold','HitTest','off'); %#ok<AGROW>
-                        end
-                    end
-
-                    % Update marker list on right panel
-                    strs = arrayfun(@(m) sprintf('%s  [%s]', m.chanName, m.type), ...
-                        markersOut, 'UniformOutput', false);
-                    set(hMkList,'String',strs,'Value',min(get(hMkList,'Value'),numel(strs)));
-                end
-
-                function setPendingPos(vox)
-                    pendingPos = vox;
-                    curVox = vox;
-                    set(hPlaceBtn,'Enable','on');
-                    recenterAllOnCurVox();
-                    refreshAll();
-                end
-
-                function recenterAllOnCurVox()
-                    % Pan each panel to keep curVox centered, preserving zoom level.
-                    vy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
-                    iz_disp = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
-                    centerAxis(axAx,  curVox(1), vy_disp);
-                    centerAxis(axCor, curVox(1), iz_disp);
-                    centerAxis(axSag, curVox(2), iz_disp);
-                    addOrientLabels(axAx,  'R','L','A','P');
-                    addOrientLabels(axCor, 'R','L','S','I');
-                    addOrientLabels(axSag, 'P','A','S','I');
-                end
-
-                function centerAxis(ax, cx, cy)
-                    xl = get(ax,'XLim');  yl = get(ax,'YLim');
-                    hw = (xl(2)-xl(1))/2;  hh = (yl(2)-yl(1))/2;
-                    set(ax,'XLim',[cx-hw, cx+hw], 'YLim',[cy-hh, cy+hh]);
-                end
-
-                % ---- Window-level callbacks ----
-                function cbWL(~,~)
-                    wW_new = str2double(get(hW,'String'));
-                    wL_new = str2double(get(hL,'String'));
-                    if ~isnan(wW_new) && wW_new > 0, wW = wW_new; end
-                    if ~isnan(wL_new), wL = wL_new; end
-                    refreshAll();
-                end
-
-                % ---- Scroll ----
-                function cbScroll(~, evt)
-                    ax = hitAxes(get(fig,'CurrentPoint'));
-                    delta = -evt.VerticalScrollCount;
-                    if ~isempty(ax), lastAx = ax; end
-                    if isempty(ax)
-                        return
-                    elseif strcmp(mode,'zoom') && ~isempty(ax)
-                        factor = 1 + 0.15*delta;
-                        % Use cursor position as center for the hovered panel;
-                        % use curVox as center for the other two panels.
-                        cp = get(ax,'CurrentPoint');
-                        ax_cx = cp(1,1);  ax_cy = cp(1,2);
-                        vy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
-                        iz_disp = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
-                        % Axial center: (vox_x, display_y)
-                        if isequal(ax, axAx)
-                            zoomAxes(axAx, factor, ax_cx, ax_cy);
-                        else
-                            zoomAxes(axAx, factor, curVox(1), vy_disp);
-                        end
-                        % Coronal center: (vox_x, display_z)
-                        if isequal(ax, axCor)
-                            zoomAxes(axCor, factor, ax_cx, ax_cy);
-                        else
-                            zoomAxes(axCor, factor, curVox(1), iz_disp);
-                        end
-                        % Sagittal center: (vox_y, display_z)
-                        if isequal(ax, axSag)
-                            zoomAxes(axSag, factor, ax_cx, ax_cy);
-                        else
-                            zoomAxes(axSag, factor, curVox(2), iz_disp);
-                        end
-                        return;
-                    end
-                    if isequal(ax, axAx)
-                        curVox(3) = max(1, min(nz, curVox(3) + delta));
-                    elseif isequal(ax, axCor)
-                        curVox(2) = max(1, min(ny, curVox(2) + delta));
-                    elseif isequal(ax, axSag)
-                        curVox(1) = max(1, min(nx, curVox(1) + delta));
-                    end
-                    refreshAll();
-                end
-
-                function zoomAxes(ax, factor, cx, cy)
-                    xl  = get(ax,'XLim');  yl = get(ax,'YLim');
-                    nxl = cx + (xl - cx) / factor;
-                    nyl = cy + (yl - cy) / factor;
-                    set(ax,'XLim',nxl,'YLim',nyl);
-                    % Reposition orientation labels to current view edges
-                    if isequal(ax, axAx)
-                        addOrientLabels(axAx,  'R','L','A','P');
-                    elseif isequal(ax, axCor)
-                        addOrientLabels(axCor, 'R','L','S','I');
-                    elseif isequal(ax, axSag)
-                        addOrientLabels(axSag, 'P','A','S','I');
-                    end
-                end
-
-                % ---- Drag to pan / click to crosshair ----
-                function cbDown(~,~)
-                    ax = hitAxes(get(fig,'CurrentPoint'));
-                    if isempty(ax), return; end
-                    lastAx   = ax;
-                    dragAxes = ax;
-                    cp           = get(ax,'CurrentPoint');
-                    dragStart    = cp(1,1:2);
-                    dragLimX     = get(ax,'XLim');
-                    dragLimY     = get(ax,'YLim');
-                    dragStartFig = get(fig,'CurrentPoint');
-                    isDragging   = false;
-                end
-                function cbMotion(~,~)
-                    if isempty(dragStart) || isempty(dragAxes), return; end
-                    figPt = get(fig,'CurrentPoint');
-                    if norm(figPt - dragStartFig) > 4
-                        isDragging = true;
-                        cp    = get(dragAxes,'CurrentPoint');
-                        delta = cp(1,1:2) - dragStart;
-                        set(dragAxes,'XLim', dragLimX - delta(1), ...
-                                     'YLim', dragLimY - delta(2));
-                        % Reposition orientation labels to current view edges
-                        if isequal(dragAxes, axAx)
-                            addOrientLabels(axAx,  'R','L','A','P');
-                        elseif isequal(dragAxes, axCor)
-                            addOrientLabels(axCor, 'R','L','S','I');
-                        elseif isequal(dragAxes, axSag)
-                            addOrientLabels(axSag, 'P','A','S','I');
-                        end
-                    end
-                end
-                function cbUp(~,~)
-                    if ~isDragging && ~isempty(dragAxes)
-                        [dp, valid] = axesDataPoint(dragAxes);
-                        if valid
-                            if isequal(dragAxes, axAx)
-                                ix = max(1,min(nx, round(dp(1))));
-                                % dp(2) is the display row (after flipud if ax_yFlip).
-                                % Invert to get original voxel index.
-                                iy_d = max(1,min(ny, round(dp(2))));
-                                iy   = ternary(ax_yFlip, ny - iy_d + 1, iy_d);
-                                setPendingPos([ix, iy, curVox(3)]);
-                            elseif isequal(dragAxes, axCor)
-                                ix   = max(1,min(nx, round(dp(1))));
-                                iz_f = max(1,min(nz, round(dp(2))));
-                                % iz_f is display row; invert only if flipud was applied
-                                iz   = ternary(cor_yTop, nz - iz_f + 1, iz_f);
-                                setPendingPos([ix, curVox(2), iz]);
-                            elseif isequal(dragAxes, axSag)
-                                iy   = max(1,min(ny, round(dp(1))));
-                                iz_f = max(1,min(nz, round(dp(2))));
-                                iz   = ternary(cor_yTop, nz - iz_f + 1, iz_f);
-                                setPendingPos([curVox(1), iy, iz]);
-                            end
-                        end
-                    end
-                    dragStart = []; dragAxes = []; dragLimX = []; dragLimY = [];
-                    dragStartFig = []; isDragging = false;
-                end
-
-                % ---- Reset view ----
-                function cbResetView(~,~)
-                    % Flip flags are in outer scope (ax_xFlip, cor_xFlip, sag_xFlip, cor_yTop)
-                    axis(axAx,'normal');
-                    set(axAx,'XLim',[0.5 nx+0.5],'YLim',[0.5 ny+0.5],'YDir','normal');
-                    if ax_xFlip,  set(axAx,'XDir','reverse');  else, set(axAx,'XDir','normal');  end
-                    axis(axCor,'normal');
-                    set(axCor,'XLim',[0.5 nx+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
-                    if cor_xFlip, set(axCor,'XDir','reverse'); else, set(axCor,'XDir','normal'); end
-                    axis(axSag,'normal');
-                    set(axSag,'XLim',[0.5 ny+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
-                    if sag_xFlip, set(axSag,'XDir','reverse'); else, set(axSag,'XDir','normal'); end
-                    addOrientLabels(axAx,  'R','L','A','P');
-                    addOrientLabels(axCor, 'R','L','S','I');
-                    addOrientLabels(axSag, 'P','A','S','I');
-                end
-
-                % ---- Keyboard shortcuts ----
-                function cbKey(~, evt)
-                    switch evt.Key
-                        case 'uparrow'
-                            ax = hitAxes(get(fig,'CurrentPoint'));
-                            if isempty(ax), ax = lastAx; end
-                            if isequal(ax,axAx)
-                                curVox(3) = min(nz, curVox(3)+1);
-                            elseif isequal(ax,axCor)
-                                curVox(2) = min(ny, curVox(2)+1);
-                            elseif isequal(ax,axSag)
-                                curVox(1) = min(nx, curVox(1)+1);
-                            end
-                            refreshAll();
-                        case 'downarrow'
-                            ax = hitAxes(get(fig,'CurrentPoint'));
-                            if isempty(ax), ax = lastAx; end
-                            if isequal(ax,axAx)
-                                curVox(3) = max(1, curVox(3)-1);
-                            elseif isequal(ax,axCor)
-                                curVox(2) = max(1, curVox(2)-1);
-                            elseif isequal(ax,axSag)
-                                curVox(1) = max(1, curVox(1)-1);
-                            end
-                            refreshAll();
-                    end
-                end
-
-                % ---- Place marker ----
-                function cbPlace(~,~)
-                    if isempty(pendingPos), return; end
-                    name = strtrim(get(hEdit,'String'));
-                    if isempty(name)
-                        listStr = get(hList,'String');
-                        if ~isempty(listStr)
-                            name = listStr{max(1, get(hList,'Value'))};
-                        end
-                    end
-                    if isempty(name)
-                        msgbox('Enter a channel name or select from the list.','','warn');
-                        return;
-                    end
-                    typeStrs = get(hType,'String');
-                    typ      = typeStrs{get(hType,'Value')};
-                    mm       = vox2mm(pendingPos);
-                    markersOut(end+1) = struct('chanName',name,'type',typ, ...
-                        'x',mm(1),'y',mm(2),'z',mm(3));
-                    set(hEdit,'String','');
-                    pendingPos = [];
-                    set(hPlaceBtn,'Enable','off');
-                    refreshAll();
-                end
-
-                % ---- Double-click placed marker → jump cursor ----
-                function cbMkListClick(~,~)
-                    if ~strcmp(get(fig,'SelectionType'),'open'), return; end
-                    idx = get(hMkList,'Value');
-                    if idx < 1 || idx > numel(markersOut), return; end
-                    m = markersOut(idx);
-                    invT  = inv(Txfm);
-                    vox_h = [m.x, m.y, m.z, 1] * invT;
-                    curVox = max(1, min([nx,ny,nz], round(vox_h(1:3))));
-                    refreshAll();
-                end
-
-                % ---- Remove marker ----
-                function cbRemove(~,~)
-                    if isempty(markersOut), return; end
-                    idx = get(hMkList,'Value');
-                    if idx < 1 || idx > numel(markersOut), return; end
-                    markersOut(idx) = [];
-                    set(hMkList,'Value', max(1, idx-1));
-                    pendingPos = curVox;
-                    set(hPlaceBtn,'Enable','on');
-                    refreshAll();
-                end
-
-                % ---- Done / close ----
-                function cbDone(~,~)
-                    if numel(markersOut) == 0
-                        choice = questdlg('No markers placed. Exit anyway?', ...
-                            'No Markers','Exit','Cancel','Cancel');
-                        if ~strcmp(choice,'Exit'), return; end
-                    end
-                    delete(fig);
-                end
-                function cbQuit(~,~)
-                    choice = questdlg('Quit localization? All placed markers will be discarded.', ...
-                        'Quit','Quit','Cancel','Cancel');
-                    if ~strcmp(choice,'Quit'), return; end
-                    markersOut = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
-                    delete(fig);
-                end
-                function cbClose(~,~)
-                    delete(fig);
-                end
-
-            end  % runSlicerGUI
-
-            % ==============================================================
-            % Nested: 3-D review
-            % ==============================================================
-            function action = run3DReview(mkrs)
-                action = 'restart';   % default if window is closed
-
-                if isempty(mkrs)
-                    action = 'restart';
+                action = self.reviewGUI(markers);
+                if strcmp(action, 'proceed')
+                    result = pts;
+                    return;
+                elseif strcmp(action, 'quit')
                     return;
                 end
+                % 'restart' → loop back to slicer
+            end
+        end
 
-                bg  = [0.12 0.12 0.12];
-                fg  = [0.92 0.92 0.92];
+        % -----------------------------------------------------------------
+        %% Show a point on an image (reverse of pointToSurface)
+        % -----------------------------------------------------------------
 
-                fig3 = figure('Name', sprintf('3-D Review — %s', self.subj), ...
-                    'NumberTitle','off','Color',bg, ...
-                    'Position',[100 80 1200 820], ...
-                    'CloseRequestFcn',@cbQuit);
+        function showPoint(self, pointIn, imagePath)
+            % Open the slicer centered on a given coordinate or vertex.
+            % Scrolling, zooming, and crosshairs are available; no placement.
+            %
+            % Usage:
+            %   el.showPoint([x y z])                    % 1×3 scanner RAS mm
+            %   el.showPoint(xyzMat)                     % n×3 XYZ, uses first row
+            %   el.showPoint(-v)                         % signed vertex: negative = lh
+            %   el.showPoint(v)                          % signed vertex: positive = rh
+            %   el.showPoint(vVec)                       % n×1 signed vertices, uses first
+            %   el.showPoint(pts(k))                     % struct from pointToSurface
+            %   el.showPoint(pointIn, '/path/to.nii')    % explicit image path (optional)
+            %
+            % Vertex sign convention (n×1 integer input):
+            %   negative  —  left  hemisphere  (abs(v) is the 1-based GIFTI vertex index)
+            %   positive  —  right hemisphere
+            %
+            % Struct input (from pointToSurface): uses snappedXYZ if present,
+            % otherwise rawXYZ.
+            %
+            % If imagePath is omitted a file dialog will appear.
 
-                ax3 = axes('Parent',fig3,'Position',[0.01 0.01 0.73 0.97], ...
-                    'Color','k','XColor','none','YColor','none','ZColor','none');
+            if nargin < 3, imagePath = ''; end
 
-                mkrXYZ   = [[mkrs.x]', [mkrs.y]', [mkrs.z]'];
-                mkrNames = {mkrs.chanName};
-                self.renderLeadsOnAxes(ax3, mkrXYZ, mkrNames);
-
-                % Right panel
-                rx = 0.755;  rw = 0.235;
-                uicontrol(fig3,'Style','text','String','Review Placements', ...
-                    'Units','normalized','Position',[rx 0.88 rw 0.06], ...
-                    'BackgroundColor',bg,'ForegroundColor',[0 0.9 0.9], ...
-                    'FontSize',13,'FontWeight','bold','HorizontalAlignment','center');
-                uicontrol(fig3,'Style','text', ...
-                    'String',sprintf('%d contacts placed.\n\nDrag to rotate.\nVerify positions.\nThen Proceed.', numel(mkrs)), ...
-                    'Units','normalized','Position',[rx 0.65 rw 0.22], ...
-                    'BackgroundColor',bg,'ForegroundColor',fg, ...
-                    'FontSize',11,'HorizontalAlignment','left');
-                uicontrol(fig3,'Style','pushbutton','String','Proceed', ...
-                    'Units','normalized','Position',[rx 0.45 rw 0.10], ...
-                    'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
-                    'FontSize',13,'FontWeight','bold','Callback',@cbProceed);
-                uicontrol(fig3,'Style','pushbutton','String','Restart Slicer', ...
-                    'Units','normalized','Position',[rx 0.32 rw 0.10], ...
-                    'BackgroundColor',[0.40 0.20 0.10],'ForegroundColor','w', ...
-                    'FontSize',12,'Callback',@cbRestart);
-                uicontrol(fig3,'Style','pushbutton','String','Quit', ...
-                    'Units','normalized','Position',[rx 0.19 rw 0.10], ...
-                    'BackgroundColor',[0.55 0.05 0.05],'ForegroundColor','w', ...
-                    'FontSize',12,'FontWeight','bold','Callback',@cbQuit);
-
-                waitfor(fig3);
-
-                function cbProceed(~,~)
-                    action = 'proceed';
-                    delete(fig3);
+            % --- Parse pointIn ---
+            ptName = '';
+            if isnumeric(pointIn)
+                if size(pointIn, 2) == 3
+                    % n×3 XYZ — use first row
+                    xyz = pointIn(1, :);
+                else
+                    % n×1 (or 1×n) signed vertex — use first entry
+                    v = pointIn(1);
+                    sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
+                    if v < 0
+                        g = gifti(fullfile(sumaDir, 'lh.pial.gii'));
+                        xyz = g.vertices(abs(v), :);
+                    else
+                        g = gifti(fullfile(sumaDir, 'rh.pial.gii'));
+                        xyz = g.vertices(v, :);
+                    end
                 end
-                function cbRestart(~,~)
-                    action = 'restart';
-                    delete(fig3);
+            elseif isstruct(pointIn)
+                if isfield(pointIn, 'snappedXYZ')
+                    xyz = pointIn(1).snappedXYZ;
+                elseif isfield(pointIn, 'rawXYZ')
+                    xyz = pointIn(1).rawXYZ;
+                else
+                    error('[showPoint] Struct must have snappedXYZ or rawXYZ field.');
                 end
-                function cbQuit(~,~)
-                    action = 'quit';
-                    delete(fig3);
+                if isfield(pointIn, 'name') && ~isempty(pointIn(1).name)
+                    ptName = pointIn(1).name;
                 end
-            end  % run3DReview
+            else
+                error('[showPoint] pointIn must be numeric or a pointToSurface struct.');
+            end
 
-        end  % manualLocalize
+            % Pre-place a marker so the dot appears in the slicer
+            initMarker = struct('chanName', ptName, 'type', 'depth', ...
+                                'x', xyz(1), 'y', xyz(2), 'z', xyz(3));
+
+            % --- Load image ---
+            if isempty(imagePath)
+                filter = {'*.nii;*.nii.gz', 'NIfTI files (*.nii, *.nii.gz)'};
+                while true
+                    choice = dlgNonModal( ...
+                        {'Select the image to view.', ...
+                         'Any same-session NIfTI works (MPRAGE, DWI, FLAIR, T2, etc.).', ...
+                         '', 'Accepted formats:  .nii  |  .nii.gz'}, ...
+                        'Show Point', 'Browse...', 'Cancel');
+                    if ~strcmp(choice, 'Browse...'), return; end
+                    [f, d] = uigetfile(filter, 'Select image file');
+                    if ~isequal(f, 0), break; end
+                end
+                imagePath = fullfile(d, f);
+            end
+            assert(exist(imagePath,'file')==2, ...
+                '[showPoint] File not found: %s', imagePath);
+
+            [vol, info] = electrodeLocalizer.loadVolume(imagePath);
+
+            electrodeLocalizer.slicerGUI(vol, info, self.subj, initMarker, {}, ...
+                'readonly', true, 'initXYZ', xyz);
+        end
 
         % -----------------------------------------------------------------
         %% Standalone 3-D lead viewer
         % -----------------------------------------------------------------
 
-        function viewLeads(self)
+        function viewLeads(self, varargin)
             % Read-only 3-D brain viewer showing named electrode positions.
             % Drag to rotate.  Close the window when done.
             %
             % Usage:  el.viewLeads()
+            %         el.viewLeads('style','opaque')   % matte gray (like ezplot)
+            %         el.viewLeads('style','translucent')  % default
+
+            ip = inputParser;
+            ip.addParameter('style', 'translucent', @ischar);
+            ip.parse(varargin{:});
+            style = ip.Results.style;
 
             % Load leads from disk if not in memory.
             if isempty(self.leads)
@@ -2317,7 +1813,7 @@ classdef electrodeLocalizer < handle
                 'BackgroundColor',[0.65 0.10 0.10],'ForegroundColor','w', ...
                 'FontSize',11,'Callback',@(~,~)delete(fig));
 
-            self.renderLeadsOnAxes(ax, xyz, names);
+            self.renderLeadsOnAxes(ax, xyz, names, 'style', style);
             fprintf('[viewLeads] %d electrodes plotted for %s. Close window when done.\n', ...
                 size(xyz,1), self.subj);
         end
@@ -2326,7 +1822,7 @@ classdef electrodeLocalizer < handle
         %% Shared 3-D brain + electrode renderer
         % -----------------------------------------------------------------
 
-        function renderLeadsOnAxes(self, ax, xyz, names)
+        function renderLeadsOnAxes(self, ax, xyz, names, varargin)
             % Render pial brain surfaces + electrode dots + name labels
             % onto an existing axes handle.
             %
@@ -2334,25 +1830,70 @@ classdef electrodeLocalizer < handle
             %   ax    - axes handle to render into
             %   xyz   - N×3 matrix of electrode positions (FreeSurfer RAS mm)
             %   names - N×1 cell array of electrode names
+            %
+            % Optional key-value:
+            %   'style'  - 'translucent' (default) or 'opaque'
+            %              'translucent': FaceAlpha=0.35, dull material, single headlight
+            %              'opaque':      FaceAlpha=1.0, phong+shading interp, 8 lightangles,
+            %                             white figure background (matches brainplotter/ezplot)
+
+            ip = inputParser;
+            ip.addParameter('style', 'translucent', @ischar);
+            ip.parse(varargin{:});
+            style = ip.Results.style;
 
             sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
             lhFile  = fullfile(sumaDir, 'lh.pial.gii');
             rhFile  = fullfile(sumaDir, 'rh.pial.gii');
 
+            axes(ax); % make ax current so material/lighting/shading act on it
             hold(ax,'on'); axis(ax,'equal'); axis(ax,'off');
-            view(ax,3); camlight(ax,'headlight'); material(ax,'dull');
+            view(ax,3);
+
+            if strcmpi(style, 'opaque')
+                faceColor = [0.60 0.60 0.60];
+                faceAlpha = 1.0;
+                set(ax.Parent, 'Color', 'w');
+                set(ax, 'Color', 'w');
+            else
+                faceColor = [0.75 0.70 0.65];
+                faceAlpha = 0.35;
+            end
 
             if exist(lhFile,'file')==2
                 lhS = gifti(lhFile);
                 patch(ax,'Faces',lhS.faces,'Vertices',lhS.vertices, ...
-                    'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
-                    'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
+                    'FaceColor',faceColor,'EdgeColor','none', ...
+                    'FaceAlpha',faceAlpha,'PickableParts','none','HitTest','off');
             end
             if exist(rhFile,'file')==2
                 rhS = gifti(rhFile);
                 patch(ax,'Faces',rhS.faces,'Vertices',rhS.vertices, ...
-                    'FaceColor',[0.75 0.70 0.65],'EdgeColor','none', ...
-                    'FaceAlpha',0.35,'PickableParts','none','HitTest','off');
+                    'FaceColor',faceColor,'EdgeColor','none', ...
+                    'FaceAlpha',faceAlpha,'PickableParts','none','HitTest','off');
+            end
+
+            % Apply lighting — must be after patches; commands act on current axes
+            if strcmpi(style, 'opaque')
+                material([0.3 0.6 0.5 10 0.5]);
+                lighting phong;
+                lights = findall(ax, 'type', 'light');
+                for ii = 1:numel(lights), lights(ii).Parent = []; end
+                nLights = 0;
+                for el = [45, -35]
+                    for az = [0, 90, 190, 270]
+                        lightangle(az, el);
+                        nLights = nLights + 1;
+                    end
+                end
+                lights = findall(ax, 'type', 'light');
+                for ii = 1:numel(lights)
+                    lights(ii).Color  = [1 1 1] / nLights * 5;
+                    lights(ii).Style  = 'infinite';
+                end
+            else
+                camlight(ax, 'headlight');
+                material(ax, 'dull');
             end
 
             N = size(xyz,1);
@@ -3375,6 +2916,51 @@ classdef electrodeLocalizer < handle
             fprintf('[Stage 5] Rigid-body transform enforced (scale stripped).\n');
         end
 
+        function [vol, info] = loadVolume(imagePath)
+            % Load a NIfTI as a 3-D double, selecting the darkest volume if 4-D,
+            % and permuting voxel dimensions to canonical (x=R/L, y=A/P, z=S/I)
+            % order based on the affine transform.
+            %
+            % Some acquisitions (e.g. DWI) store voxel dims in a non-standard
+            % order.  The affine columns reveal the true anatomical meaning of
+            % each dim; permuting to canonical order ensures the slicer always
+            % displays axial/coronal/sagittal correctly regardless of acquisition.
+            info = niftiinfo(imagePath);
+            raw  = double(niftiread(info));
+
+            % Extract 3-D volume (darkest if 4-D)
+            if ndims(raw) == 4
+                nVols = size(raw, 4);
+                means = zeros(1, nVols);
+                for vi = 1:nVols
+                    means(vi) = mean(raw(:,:,:,vi), 'all');
+                end
+                [~, idx] = min(means);
+                fprintf('[loadVolume] 4-D NIfTI (%d volumes) — using darkest (vol %d).\n', nVols, idx);
+                vol = raw(:,:,:,idx);
+            else
+                vol = raw;
+            end
+
+            % Permute dims to canonical order if needed.
+            % info.Transform.T uses row-vector convention: mm = [i,j,k,1] * T
+            % T(d, ax): how much anatomical axis ax (1=x,2=y,3=z) changes per
+            % unit step in voxel dim d.  For each anatomical axis, find which
+            % voxel dim is most aligned with it, then permute accordingly.
+            T = info.Transform.T;
+            M = abs(T(1:3, 1:3));             % M(dim, axis)
+            [~, perm] = max(M, [], 1);        % perm(axis) = voxel dim most aligned with that axis
+            if ~isequal(perm, [1 2 3])
+                fprintf('[loadVolume] Permuting voxel dims [%d %d %d] → canonical [1 2 3].\n', perm);
+                vol              = permute(vol, perm);
+                T_new            = T;
+                T_new(1:3, :)    = T(perm, :);   % reorder rows to match new dim ordering
+                info.Transform.T = T_new;
+                info.PixelDimensions(1:3) = info.PixelDimensions(perm);
+                info.ImageSize(1:3)       = info.ImageSize(perm);
+            end
+        end
+
         function out = ternary(cond, a, b)
             % Inline ternary: returns a if cond is true, else b.
             if cond, out = a; else, out = b; end
@@ -3400,6 +2986,680 @@ classdef electrodeLocalizer < handle
             end
             fprintf('| [%s]  %s%s\n', status, label, tag);
         end
+
+        function markersOut = slicerGUI(vol, info, subj, markersIn, chanNames, varargin)
+            % Three-plane NIfTI slicer GUI for placing named markers.
+            % Shared by manualLocalize, pointToSurface, and showPoint.
+            %
+            % Inputs:
+            %   vol        - 3-D double volume [nx ny nz]
+            %   info       - niftiinfo struct for vol
+            %   subj       - subject string (for figure title)
+            %   markersIn  - existing markers struct array (may be empty)
+            %   chanNames  - cell array of suggested channel names.
+            %                Pass {} for free-form / auto-numbered points.
+            %
+            % Optional name-value:
+            %   'readonly'  - true: hide placement controls; viewer only (default false)
+            %   'initXYZ'   - [1x3] scanner RAS mm to center crosshairs on at open
+            %
+            % Output:
+            %   markersOut - updated markers struct array
+            %                (empty if user quit without placing any)
+
+            ip2 = inputParser;
+            ip2.addParameter('readonly', false);
+            ip2.addParameter('initXYZ',  []);
+            ip2.parse(varargin{:});
+            readonly = ip2.Results.readonly;
+            initXYZ  = ip2.Results.initXYZ;
+
+            % Derive volume metadata
+            Txfm     = info.Transform.T;
+            [nx, ny, nz] = size(vol);
+            pixdim   = info.PixelDimensions;   %#ok<NASGU>
+            vox2mm   = @(v) ([v, ones(size(v,1),1)] * Txfm);
+
+            % ---- State ----
+            curVox = [round(nx/2), round(ny/2), round(nz/2)];
+            if ~isempty(initXYZ)
+                invT   = inv(Txfm);
+                vox_h  = [initXYZ(:)', 1] * invT;
+                curVox = max(1, min([nx,ny,nz], round(vox_h(1:3))));
+            end
+            wW = 3000;  wL = 700;
+            mode = 'scroll';
+            dragStart    = [];
+            dragStartFig = [];
+            dragLimX     = [];
+            dragLimY     = [];
+            dragAxes     = [];
+            isDragging   = false;
+            lastAx       = [];
+            markersOut   = markersIn;
+            pendingPos   = [];
+
+            % ---- Orientation flip flags ----
+            colX_ = Txfm(1:3,1);  colY_ = Txfm(1:3,2);  colZ_ = Txfm(1:3,3);
+            ax_xFlip  = colX_(1) > 0;
+            ax_yFlip  = colY_(2) < 0;
+            cor_xFlip = colX_(1) > 0;
+            cor_yTop  = colZ_(3) < 0;
+            sag_xFlip = colY_(2) < 0;
+
+            % ---- Color scheme ----
+            bg  = [0.12 0.12 0.12];
+            bg2 = [0.18 0.18 0.18];
+            bg3 = [0.22 0.22 0.22];
+            fg  = [0.92 0.92 0.92];
+            acc = [0  0.9 0.9];
+
+            % ---- Figure ----
+            fig = figure('Name', sprintf('Slicer — %s', subj), ...
+                'NumberTitle','off','Color',bg, ...
+                'Position',[30 30 1500 870], ...
+                'WindowKeyPressFcn',@cbKey, ...
+                'WindowScrollWheelFcn',@cbScroll, ...
+                'WindowButtonDownFcn',@cbDown, ...
+                'WindowButtonMotionFcn',@cbMotion, ...
+                'WindowButtonUpFcn',@cbUp, ...
+                'CloseRequestFcn',@cbClose);
+
+            % ---- Toolbar strip ----
+            tbH  = 0.048;
+            tb1Y = 0.950;
+            tb2Y = tb1Y - tbH - 0.006;
+
+            uicontrol(fig,'Style','text','String','Mode:', ...
+                'Units','normalized','Position',[0.01 tb1Y 0.04 tbH], ...
+                'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+            btnNormal = uicontrol(fig,'Style','togglebutton','String','Scroll', ...
+                'Units','normalized','Position',[0.05 tb1Y 0.07 tbH], ...
+                'BackgroundColor',[0.25 0.55 0.25],'ForegroundColor','w', ...
+                'FontSize',10,'Value',1,'Callback',@(~,~) setMode('scroll'));
+            btnZoom = uicontrol(fig,'Style','togglebutton','String','Zoom', ...
+                'Units','normalized','Position',[0.13 tb1Y 0.06 tbH], ...
+                'BackgroundColor',bg2,'ForegroundColor',fg, ...
+                'FontSize',10,'Value',0,'Callback',@(~,~) setMode('zoom'));
+            uicontrol(fig,'Style','text', ...
+                'String','Drag to pan  |  Click to place crosshair  |  Scroll: slice (scroll mode) / zoom (zoom mode)', ...
+                'Units','normalized','Position',[0.20 tb1Y 0.56 tbH], ...
+                'BackgroundColor',bg,'ForegroundColor',[0.5 0.5 0.5],'FontSize',9, ...
+                'HorizontalAlignment','left');
+
+            uicontrol(fig,'Style','text','String','W:', ...
+                'Units','normalized','Position',[0.01 tb2Y 0.025 tbH], ...
+                'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+            hW = uicontrol(fig,'Style','edit','String',num2str(wW), ...
+                'Units','normalized','Position',[0.038 tb2Y 0.060 tbH], ...
+                'BackgroundColor',bg3,'ForegroundColor',fg, ...
+                'FontSize',10,'Callback',@cbWL);
+            uicontrol(fig,'Style','text','String','L:', ...
+                'Units','normalized','Position',[0.103 tb2Y 0.025 tbH], ...
+                'BackgroundColor',bg,'ForegroundColor',fg,'FontSize',10);
+            hL = uicontrol(fig,'Style','edit','String',num2str(wL), ...
+                'Units','normalized','Position',[0.131 tb2Y 0.060 tbH], ...
+                'BackgroundColor',bg3,'ForegroundColor',fg, ...
+                'FontSize',10,'Callback',@cbWL);
+            uicontrol(fig,'Style','pushbutton','String','Reset View', ...
+                'Units','normalized','Position',[0.20 tb2Y 0.08 tbH], ...
+                'BackgroundColor',bg2,'ForegroundColor',fg, ...
+                'FontSize',10,'Callback',@cbResetView);
+
+            % ---- Slice panels ----
+            figPos = get(fig,'Position');
+            panW = 0.235;
+            panH = panW * figPos(3) / figPos(4);
+            panY = (tb2Y - panH) / 2 + 0.005;
+            axAx  = axes('Parent',fig,'Position',[0.005 panY panW panH], ...
+                'Color','k','XColor','none','YColor','none'); hold(axAx,'on');
+            axCor = axes('Parent',fig,'Position',[0.248 panY panW panH], ...
+                'Color','k','XColor','none','YColor','none'); hold(axCor,'on');
+            axSag = axes('Parent',fig,'Position',[0.491 panY panW panH], ...
+                'Color','k','XColor','none','YColor','none'); hold(axSag,'on');
+
+            hImAx  = []; hImCor = []; hImSag = [];
+            hXHax  = [];  hXHcor = [];  hXHsag = [];
+            hMkAx  = [];  hMkCor = [];  hMkSag = [];
+            hTitleAx  = title(axAx,  '','Color',fg,'FontSize',9);
+            hTitleCor = title(axCor, '','Color',fg,'FontSize',9);
+            hTitleSag = title(axSag, '','Color',fg,'FontSize',9);
+
+            hStatus = uicontrol(fig,'Style','text', ...
+                'Units','normalized','Position',[0.005 0.003 0.73 0.038], ...
+                'BackgroundColor',bg,'ForegroundColor',[0.5 0.8 1.0], ...
+                'FontSize',10,'HorizontalAlignment','left','String','Click on a location');
+
+            % ---- Right panel ----
+            rx = 0.742;  rw = 0.253;
+            uicontrol(fig,'Style','text','String','Slicer', ...
+                'Units','normalized','Position',[rx 0.94 rw 0.05], ...
+                'BackgroundColor',bg,'ForegroundColor',acc, ...
+                'FontSize',14,'FontWeight','bold','HorizontalAlignment','center');
+            hChanNameLbl = uicontrol(fig,'Style','text','String','Channel name:', ...
+                'Units','normalized','Position',[rx 0.89 rw 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+            hList = uicontrol(fig,'Style','listbox', ...
+                'Units','normalized','Position',[rx 0.68 rw 0.21], ...
+                'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',11,'String',{}, ...
+                'KeyPressFcn',@cbKey);
+            hOrTypeLbl = uicontrol(fig,'Style','text','String','Or type name:', ...
+                'Units','normalized','Position',[rx 0.635 rw 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+            hEdit = uicontrol(fig,'Style','edit', ...
+                'Units','normalized','Position',[rx 0.585 rw 0.048], ...
+                'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
+                'FontSize',11,'HorizontalAlignment','left','String','', ...
+                'KeyPressFcn',@cbKey);
+            hElecTypeLbl = uicontrol(fig,'Style','text','String','Electrode type:', ...
+                'Units','normalized','Position',[rx 0.54 rw 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+            hType = uicontrol(fig,'Style','popupmenu', ...
+                'Units','normalized','Position',[rx 0.49 rw 0.048], ...
+                'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor',fg, ...
+                'FontSize',11,'String',{'depth','subdural'},'Value',1);
+            hPlaceBtn = uicontrol(fig,'Style','pushbutton', ...
+                'String','Place Marker', ...
+                'Units','normalized','Position',[rx 0.42 rw 0.063], ...
+                'BackgroundColor',[0.18 0.48 0.18],'ForegroundColor','w', ...
+                'FontSize',12,'FontWeight','bold','Enable','off','Callback',@cbPlace);
+            hPlacedLbl = uicontrol(fig,'Style','text','String','Placed markers:', ...
+                'Units','normalized','Position',[rx 0.37 rw 0.04], ...
+                'BackgroundColor',bg,'ForegroundColor',fg, ...
+                'FontSize',10,'HorizontalAlignment','left');
+            hMkList = uicontrol(fig,'Style','listbox', ...
+                'Units','normalized','Position',[rx 0.19 rw 0.18], ...
+                'BackgroundColor',bg3,'ForegroundColor',fg,'FontSize',10,'String',{}, ...
+                'Callback',@cbMkListClick,'KeyPressFcn',@cbKey);
+            hRemoveBtn = uicontrol(fig,'Style','pushbutton','String','Remove Selected', ...
+                'Units','normalized','Position',[rx 0.13 rw 0.056], ...
+                'BackgroundColor',[0.48 0.18 0.18],'ForegroundColor','w', ...
+                'FontSize',10,'Callback',@cbRemove);
+            hQuitBtn = uicontrol(fig,'Style','pushbutton','String','Quit', ...
+                'Units','normalized','Position',[rx 0.02 rw*0.44 0.09], ...
+                'BackgroundColor',[0.35 0.15 0.15],'ForegroundColor','w', ...
+                'FontSize',11,'Callback',@cbQuit);
+            hDoneBtn = uicontrol(fig,'Style','pushbutton','String','Done', ...
+                'Units','normalized','Position',[rx+rw*0.56 0.02 rw*0.44 0.09], ...
+                'BackgroundColor',[0.20 0.38 0.58],'ForegroundColor','w', ...
+                'FontSize',11,'FontWeight','bold','Callback',@cbDone);
+
+            % Point-picker mode: hide channel list and electrode type dropdown
+            if isempty(chanNames) && ~readonly
+                set(hChanNameLbl, 'Visible','off');
+                set(hList,        'Visible','off');
+                set(hElecTypeLbl, 'Visible','off');
+                set(hType,        'Visible','off');
+                set(hOrTypeLbl,   'String','Point name (optional):', ...
+                                  'Position',[rx 0.89 rw 0.04]);
+                set(hEdit,        'Position',[rx 0.835 rw 0.048]);
+                set(hPlaceBtn,    'Position',[rx 0.755 rw 0.063]);
+            end
+
+            % Read-only viewer mode: hide all placement controls, show Close button
+            if readonly
+                allPlacement = [hChanNameLbl, hList, hOrTypeLbl, hEdit, ...
+                                hElecTypeLbl, hType, hPlaceBtn, ...
+                                hPlacedLbl, hMkList, hRemoveBtn, ...
+                                hQuitBtn, hDoneBtn];
+                set(allPlacement, 'Visible','off');
+                uicontrol(fig,'Style','pushbutton','String','Close', ...
+                    'Units','normalized','Position',[rx 0.02 rw 0.09], ...
+                    'BackgroundColor',[0.25 0.25 0.25],'ForegroundColor','w', ...
+                    'FontSize',12,'Callback',@(~,~) delete(fig));
+                set(fig,'Name', sprintf('Viewer — %s', subj));
+            end
+
+            refreshAll();
+            waitfor(fig);
+
+            % ---- Helpers ----
+            function setMode(m)
+                mode = m;
+                set(btnNormal,'Value', strcmp(m,'scroll'), ...
+                    'BackgroundColor', ternary(strcmp(m,'scroll'),[0.25 0.55 0.25],bg2));
+                set(btnZoom,  'Value', strcmp(m,'zoom'), ...
+                    'BackgroundColor', ternary(strcmp(m,'zoom'), [0.10 0.35 0.55],bg2));
+            end
+
+            function v = ternary(cond, a, b)
+                if cond, v = a; else, v = b; end
+            end
+
+            function addOrientLabels(ax, leftLbl, rightLbl, topLbl, botLbl)
+                prevLbls = findobj(ax,'Tag','orientLabel');
+                if ~isempty(prevLbls), delete(prevLbls); end
+                xl = get(ax,'XLim');  yl = get(ax,'YLim');
+                xrev = strcmp(get(ax,'XDir'),'reverse');
+                yrev = strcmp(get(ax,'YDir'),'reverse');
+                xL = xl(1 + xrev);   xR = xl(2 - xrev);
+                yT = yl(2 - yrev);   yB = yl(1 + yrev);
+                dx = 0.03*(xl(2)-xl(1)) * (1 - 2*xrev);
+                dy = 0.03*(yl(2)-yl(1)) * (1 - 2*yrev);
+                txtArgs = {'Units','data','FontSize',10,'FontWeight','bold', ...
+                           'Color',[1 1 0],'HitTest','off','Tag','orientLabel', ...
+                           'Clipping','off'};
+                text(ax, xL+dx, mean(yl), leftLbl,  txtArgs{:}, ...
+                    'HorizontalAlignment','left',  'VerticalAlignment','middle');
+                text(ax, xR-dx, mean(yl), rightLbl, txtArgs{:}, ...
+                    'HorizontalAlignment','right', 'VerticalAlignment','middle');
+                text(ax, mean(xl), yT-dy, topLbl,   txtArgs{:}, ...
+                    'HorizontalAlignment','center','VerticalAlignment','top');
+                text(ax, mean(xl), yB+dy, botLbl,   txtArgs{:}, ...
+                    'HorizontalAlignment','center','VerticalAlignment','bottom');
+            end
+
+            function ax = hitAxes(pt)
+                figPos = get(fig,'Position');
+                np = pt ./ figPos(3:4);
+                ax = [];
+                for aa = [axAx, axCor, axSag]
+                    apos = get(aa,'Position');
+                    if np(1) >= apos(1) && np(1) <= apos(1)+apos(3) && ...
+                       np(2) >= apos(2) && np(2) <= apos(2)+apos(4)
+                        ax = aa;
+                        return;
+                    end
+                end
+            end
+
+            function [dp, valid] = axesDataPoint(ax)
+                cp = get(ax,'CurrentPoint');
+                dp = cp(1,1:2);
+                xl = get(ax,'XLim');  yl = get(ax,'YLim');
+                valid = dp(1)>=xl(1) && dp(1)<=xl(2) && dp(2)>=yl(1) && dp(2)<=yl(2);
+            end
+
+            function refreshAll()
+                if ~ishandle(fig), return; end
+                clim_lo = wL - wW/2;
+                clim_hi = wL + wW/2;
+
+                % Axial
+                sl_ax = vol(:,:,curVox(3))';
+                if ax_yFlip, sl_ax = flipud(sl_ax); end
+                if isempty(hImAx) || ~ishandle(hImAx)
+                    hImAx = imagesc(axAx, sl_ax, [clim_lo clim_hi]);
+                    colormap(axAx, gray);
+                    axis(axAx,'normal');
+                    set(axAx,'XLim',[0.5 nx+0.5],'YLim',[0.5 ny+0.5],'YDir','normal');
+                    if ax_xFlip, set(axAx,'XDir','reverse'); end
+                    addOrientLabels(axAx, 'R','L','A','P');
+                else
+                    set(hImAx,'CData',sl_ax);
+                    clim(axAx,[clim_lo clim_hi]);
+                end
+                set(hTitleAx,'String',sprintf('AXIAL   z=%d/%d',curVox(3),nz));
+
+                % Coronal
+                sl_cor = squeeze(vol(:,curVox(2),:))';
+                if cor_yTop, sl_cor = flipud(sl_cor); end
+                if isempty(hImCor) || ~ishandle(hImCor)
+                    hImCor = imagesc(axCor, sl_cor, [clim_lo clim_hi]);
+                    colormap(axCor, gray);
+                    axis(axCor,'normal');
+                    set(axCor,'XLim',[0.5 nx+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                    if cor_xFlip, set(axCor,'XDir','reverse'); end
+                    addOrientLabels(axCor, 'R','L','S','I');
+                else
+                    set(hImCor,'CData',sl_cor);
+                    clim(axCor,[clim_lo clim_hi]);
+                end
+                set(hTitleCor,'String',sprintf('CORONAL   y=%d/%d',curVox(2),ny));
+
+                % Sagittal
+                sl_sag = squeeze(vol(curVox(1),:,:))';
+                if cor_yTop, sl_sag = flipud(sl_sag); end
+                if isempty(hImSag) || ~ishandle(hImSag)
+                    hImSag = imagesc(axSag, sl_sag, [clim_lo clim_hi]);
+                    colormap(axSag, gray);
+                    axis(axSag,'normal');
+                    set(axSag,'XLim',[0.5 ny+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                    if sag_xFlip, set(axSag,'XDir','reverse'); end
+                    addOrientLabels(axSag, 'P','A','S','I');
+                else
+                    set(hImSag,'CData',sl_sag);
+                    clim(axSag,[clim_lo clim_hi]);
+                end
+                set(hTitleSag,'String',sprintf('SAGITTAL   x=%d/%d',curVox(1),nx));
+
+                refreshCrosshairs();
+                refreshMarkers();
+
+                mm = vox2mm(curVox);
+                set(hStatus,'String', ...
+                    sprintf('  vox [%d, %d, %d]    x=%.1f  y=%.1f  z=%.1f mm', ...
+                    curVox(1),curVox(2),curVox(3), mm(1),mm(2),mm(3)));
+
+                if ~isempty(chanNames)
+                    used = {markersOut.chanName};
+                    rem  = chanNames(~ismember(chanNames, used));
+                    set(hList,'String',rem(:), ...
+                        'Value',max(1,min(get(hList,'Value'),numel(rem))));
+                end
+            end
+
+            function refreshCrosshairs()
+                if ~ishandle(fig), return; end
+                iy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
+                if ~isempty(hXHax) && all(ishandle(hXHax)), delete(hXHax); end
+                hXHax(1) = plot(axAx, [curVox(1) curVox(1)], [0.5 ny+0.5], ...
+                    'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                hXHax(2) = plot(axAx, [0.5 nx+0.5], [iy_disp iy_disp], ...
+                    'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+
+                iz_cor = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
+                if ~isempty(hXHcor) && all(ishandle(hXHcor)), delete(hXHcor); end
+                hXHcor(1) = plot(axCor, [curVox(1) curVox(1)], [0.5 nz+0.5], ...
+                    'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                hXHcor(2) = plot(axCor, [0.5 nx+0.5], [iz_cor iz_cor], ...
+                    'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+
+                if ~isempty(hXHsag) && all(ishandle(hXHsag)), delete(hXHsag); end
+                hXHsag(1) = plot(axSag, [curVox(2) curVox(2)], [0.5 nz+0.5], ...
+                    'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+                hXHsag(2) = plot(axSag, [0.5 ny+0.5], [iz_cor iz_cor], ...
+                    'Color',[1 0.3 0.3],'LineWidth',0.8,'HitTest','off');
+            end
+
+            function refreshMarkers()
+                if ~ishandle(fig), return; end
+                if ~isempty(hMkAx)  && all(ishandle(hMkAx)),  delete(hMkAx);  end
+                if ~isempty(hMkCor) && all(ishandle(hMkCor)), delete(hMkCor); end
+                if ~isempty(hMkSag) && all(ishandle(hMkSag)), delete(hMkSag); end
+                hMkAx = []; hMkCor = []; hMkSag = [];
+                if isempty(markersOut)
+                    set(hMkList,'String',{},'Value',1);
+                    return;
+                end
+
+                invT = inv(Txfm);
+                for mi = 1:numel(markersOut)
+                    mm_h = [markersOut(mi).x, markersOut(mi).y, markersOut(mi).z, 1];
+                    vx   = round(mm_h * invT);
+                    vx   = vx(1:3);
+                    mkCol  = [0.15 0.35 0.85];
+                    txtCol = [0.55 0.75 1.00];
+
+                    if abs(vx(3) - curVox(3)) <= 1
+                        vy_disp = ternary(ax_yFlip, ny - vx(2) + 1, vx(2));
+                        hMkAx(end+1) = scatter(axAx, vx(1), vy_disp, 80, mkCol, ...
+                            'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
+                        hMkAx(end+1) = text(axAx, vx(1)+2, vy_disp, ...
+                            markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                            'FontWeight','bold','HitTest','off'); %#ok<AGROW>
+                    end
+                    iz_c = ternary(cor_yTop, nz - vx(3) + 1, vx(3));
+                    if abs(vx(2) - curVox(2)) <= 1
+                        hMkCor(end+1) = scatter(axCor, vx(1), iz_c, 80, mkCol, ...
+                            'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
+                        hMkCor(end+1) = text(axCor, vx(1)+2, iz_c, ...
+                            markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                            'FontWeight','bold','HitTest','off'); %#ok<AGROW>
+                    end
+                    if abs(vx(1) - curVox(1)) <= 1
+                        hMkSag(end+1) = scatter(axSag, vx(2), iz_c, 80, mkCol, ...
+                            'filled','HitTest','off','MarkerEdgeColor','w','LineWidth',0.5); %#ok<AGROW>
+                        hMkSag(end+1) = text(axSag, vx(2)+2, iz_c, ...
+                            markersOut(mi).chanName,'Color',txtCol,'FontSize',8, ...
+                            'FontWeight','bold','HitTest','off'); %#ok<AGROW>
+                    end
+                end
+                if isempty(chanNames)
+                    strs = arrayfun(@(m) m.chanName, markersOut, 'UniformOutput', false);
+                else
+                    strs = arrayfun(@(m) sprintf('%s  [%s]', m.chanName, m.type), ...
+                        markersOut, 'UniformOutput', false);
+                end
+                set(hMkList,'String',strs,'Value',min(get(hMkList,'Value'),numel(strs)));
+            end
+
+            function setPendingPos(vox)
+                pendingPos = vox;
+                curVox = vox;
+                set(hPlaceBtn,'Enable','on');
+                recenterAllOnCurVox();
+                refreshAll();
+            end
+
+            function recenterAllOnCurVox()
+                vy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
+                iz_disp = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
+                centerAxis(axAx,  curVox(1), vy_disp);
+                centerAxis(axCor, curVox(1), iz_disp);
+                centerAxis(axSag, curVox(2), iz_disp);
+                addOrientLabels(axAx,  'R','L','A','P');
+                addOrientLabels(axCor, 'R','L','S','I');
+                addOrientLabels(axSag, 'P','A','S','I');
+            end
+
+            function centerAxis(ax, cx, cy)
+                xl = get(ax,'XLim');  yl = get(ax,'YLim');
+                hw = (xl(2)-xl(1))/2;  hh = (yl(2)-yl(1))/2;
+                set(ax,'XLim',[cx-hw, cx+hw], 'YLim',[cy-hh, cy+hh]);
+            end
+
+            function cbWL(~,~)
+                wW_new = str2double(get(hW,'String'));
+                wL_new = str2double(get(hL,'String'));
+                if ~isnan(wW_new) && wW_new > 0, wW = wW_new; end
+                if ~isnan(wL_new), wL = wL_new; end
+                refreshAll();
+            end
+
+            function cbScroll(~, evt)
+                ax = hitAxes(get(fig,'CurrentPoint'));
+                delta = -evt.VerticalScrollCount;
+                if ~isempty(ax), lastAx = ax; end
+                if isempty(ax)
+                    return
+                elseif strcmp(mode,'zoom') && ~isempty(ax)
+                    factor = 1 + 0.15*delta;
+                    cp = get(ax,'CurrentPoint');
+                    ax_cx = cp(1,1);  ax_cy = cp(1,2);
+                    vy_disp = ternary(ax_yFlip, ny - curVox(2) + 1, curVox(2));
+                    iz_disp = ternary(cor_yTop, nz - curVox(3) + 1, curVox(3));
+                    if isequal(ax, axAx)
+                        zoomAxes(axAx, factor, ax_cx, ax_cy);
+                    else
+                        zoomAxes(axAx, factor, curVox(1), vy_disp);
+                    end
+                    if isequal(ax, axCor)
+                        zoomAxes(axCor, factor, ax_cx, ax_cy);
+                    else
+                        zoomAxes(axCor, factor, curVox(1), iz_disp);
+                    end
+                    if isequal(ax, axSag)
+                        zoomAxes(axSag, factor, ax_cx, ax_cy);
+                    else
+                        zoomAxes(axSag, factor, curVox(2), iz_disp);
+                    end
+                    return;
+                end
+                if isequal(ax, axAx)
+                    curVox(3) = max(1, min(nz, curVox(3) + delta));
+                elseif isequal(ax, axCor)
+                    curVox(2) = max(1, min(ny, curVox(2) + delta));
+                elseif isequal(ax, axSag)
+                    curVox(1) = max(1, min(nx, curVox(1) + delta));
+                end
+                refreshAll();
+            end
+
+            function zoomAxes(ax, factor, cx, cy)
+                xl  = get(ax,'XLim');  yl = get(ax,'YLim');
+                nxl = cx + (xl - cx) / factor;
+                nyl = cy + (yl - cy) / factor;
+                set(ax,'XLim',nxl,'YLim',nyl);
+                if isequal(ax, axAx),       addOrientLabels(axAx,  'R','L','A','P');
+                elseif isequal(ax, axCor),  addOrientLabels(axCor, 'R','L','S','I');
+                elseif isequal(ax, axSag),  addOrientLabels(axSag, 'P','A','S','I');
+                end
+            end
+
+            function cbDown(~,~)
+                ax = hitAxes(get(fig,'CurrentPoint'));
+                if isempty(ax), return; end
+                lastAx   = ax;
+                dragAxes = ax;
+                cp           = get(ax,'CurrentPoint');
+                dragStart    = cp(1,1:2);
+                dragLimX     = get(ax,'XLim');
+                dragLimY     = get(ax,'YLim');
+                dragStartFig = get(fig,'CurrentPoint');
+                isDragging   = false;
+            end
+            function cbMotion(~,~)
+                if isempty(dragStart) || isempty(dragAxes), return; end
+                figPt = get(fig,'CurrentPoint');
+                if norm(figPt - dragStartFig) > 4
+                    isDragging = true;
+                    cp    = get(dragAxes,'CurrentPoint');
+                    delta = cp(1,1:2) - dragStart;
+                    set(dragAxes,'XLim', dragLimX - delta(1), ...
+                                 'YLim', dragLimY - delta(2));
+                    if isequal(dragAxes, axAx),      addOrientLabels(axAx,  'R','L','A','P');
+                    elseif isequal(dragAxes, axCor), addOrientLabels(axCor, 'R','L','S','I');
+                    elseif isequal(dragAxes, axSag), addOrientLabels(axSag, 'P','A','S','I');
+                    end
+                end
+            end
+            function cbUp(~,~)
+                if ~isDragging && ~isempty(dragAxes)
+                    [dp, valid] = axesDataPoint(dragAxes);
+                    if valid
+                        if isequal(dragAxes, axAx)
+                            ix   = max(1,min(nx, round(dp(1))));
+                            iy_d = max(1,min(ny, round(dp(2))));
+                            iy   = ternary(ax_yFlip, ny - iy_d + 1, iy_d);
+                            setPendingPos([ix, iy, curVox(3)]);
+                        elseif isequal(dragAxes, axCor)
+                            ix   = max(1,min(nx, round(dp(1))));
+                            iz_f = max(1,min(nz, round(dp(2))));
+                            iz   = ternary(cor_yTop, nz - iz_f + 1, iz_f);
+                            setPendingPos([ix, curVox(2), iz]);
+                        elseif isequal(dragAxes, axSag)
+                            iy   = max(1,min(ny, round(dp(1))));
+                            iz_f = max(1,min(nz, round(dp(2))));
+                            iz   = ternary(cor_yTop, nz - iz_f + 1, iz_f);
+                            setPendingPos([curVox(1), iy, iz]);
+                        end
+                    end
+                end
+                dragStart = []; dragAxes = []; dragLimX = []; dragLimY = [];
+                dragStartFig = []; isDragging = false;
+            end
+
+            function cbResetView(~,~)
+                axis(axAx,'normal');
+                set(axAx,'XLim',[0.5 nx+0.5],'YLim',[0.5 ny+0.5],'YDir','normal');
+                if ax_xFlip,  set(axAx,'XDir','reverse');  else, set(axAx,'XDir','normal');  end
+                axis(axCor,'normal');
+                set(axCor,'XLim',[0.5 nx+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                if cor_xFlip, set(axCor,'XDir','reverse'); else, set(axCor,'XDir','normal'); end
+                axis(axSag,'normal');
+                set(axSag,'XLim',[0.5 ny+0.5],'YLim',[0.5 nz+0.5],'YDir','normal');
+                if sag_xFlip, set(axSag,'XDir','reverse'); else, set(axSag,'XDir','normal'); end
+                addOrientLabels(axAx,  'R','L','A','P');
+                addOrientLabels(axCor, 'R','L','S','I');
+                addOrientLabels(axSag, 'P','A','S','I');
+            end
+
+            function cbKey(~, evt)
+                switch evt.Key
+                    case 'uparrow'
+                        ax = hitAxes(get(fig,'CurrentPoint'));
+                        if isempty(ax), ax = lastAx; end
+                        if isequal(ax,axAx),       curVox(3) = min(nz, curVox(3)+1);
+                        elseif isequal(ax,axCor),  curVox(2) = min(ny, curVox(2)+1);
+                        elseif isequal(ax,axSag),  curVox(1) = min(nx, curVox(1)+1);
+                        end
+                        refreshAll();
+                    case 'downarrow'
+                        ax = hitAxes(get(fig,'CurrentPoint'));
+                        if isempty(ax), ax = lastAx; end
+                        if isequal(ax,axAx),       curVox(3) = max(1, curVox(3)-1);
+                        elseif isequal(ax,axCor),  curVox(2) = max(1, curVox(2)-1);
+                        elseif isequal(ax,axSag),  curVox(1) = max(1, curVox(1)-1);
+                        end
+                        refreshAll();
+                end
+            end
+
+            function cbPlace(~,~)
+                if isempty(pendingPos), return; end
+                name = strtrim(get(hEdit,'String'));
+                if isempty(name)
+                    listStr = get(hList,'String');
+                    if ~isempty(listStr)
+                        name = listStr{max(1, get(hList,'Value'))};
+                    end
+                end
+                if isempty(name)
+                    if isempty(chanNames)
+                        % Auto-number when no channel list provided
+                        name = sprintf('Point %d', numel(markersOut)+1);
+                    else
+                        msgbox('Enter a channel name or select from the list.','','warn');
+                        return;
+                    end
+                end
+                typeStrs = get(hType,'String');
+                typ      = typeStrs{get(hType,'Value')};
+                mm       = vox2mm(pendingPos);
+                markersOut(end+1) = struct('chanName',name,'type',typ, ...
+                    'x',mm(1),'y',mm(2),'z',mm(3));
+                set(hEdit,'String','');
+                pendingPos = [];
+                set(hPlaceBtn,'Enable','off');
+                refreshAll();
+            end
+
+            function cbMkListClick(~,~)
+                if ~strcmp(get(fig,'SelectionType'),'open'), return; end
+                idx = get(hMkList,'Value');
+                if idx < 1 || idx > numel(markersOut), return; end
+                m = markersOut(idx);
+                invT  = inv(Txfm);
+                vox_h = [m.x, m.y, m.z, 1] * invT;
+                curVox = max(1, min([nx,ny,nz], round(vox_h(1:3))));
+                refreshAll();
+            end
+
+            function cbRemove(~,~)
+                if isempty(markersOut), return; end
+                idx = get(hMkList,'Value');
+                if idx < 1 || idx > numel(markersOut), return; end
+                markersOut(idx) = [];
+                set(hMkList,'Value', max(1, idx-1));
+                pendingPos = curVox;
+                set(hPlaceBtn,'Enable','on');
+                refreshAll();
+            end
+
+            function cbDone(~,~)
+                if numel(markersOut) == 0
+                    choice = questdlg('No markers placed. Exit anyway?', ...
+                        'No Markers','Exit','Cancel','Cancel');
+                    if ~strcmp(choice,'Exit'), return; end
+                end
+                delete(fig);
+            end
+            function cbQuit(~,~)
+                choice = questdlg('Quit? All placed markers will be discarded.', ...
+                    'Quit','Quit','Cancel','Cancel');
+                if ~strcmp(choice,'Quit'), return; end
+                markersOut = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
+                delete(fig);
+            end
+            function cbClose(~,~)
+                delete(fig);
+            end
+
+        end  % slicerGUI
 
     end % static private methods
 

@@ -1801,6 +1801,180 @@ classdef sourceLocalizer < handle
 
         end
 
+
+        % -----------------------------------------------------------------
+        %% Staggered time series viewer
+        % -----------------------------------------------------------------
+
+        function plotTimeSeries(self, varargin)
+            % Staggered multi-channel time series viewer with mini overview and drag scroll.
+            %
+            % Usage:
+            %   sl.plotTimeSeries()
+            %   sl.plotTimeSeries('winSec', 1800)   % 30-min window (default)
+            %   sl.plotTimeSeries('stagger', 1)     % z-score unit spacing (default)
+            %
+            % Navigation:
+            %   Drag the blue window on the mini overview to scroll
+            %   Left/Right arrow  — scroll 25% of window
+            %   PageUp/PageDown   — scroll one full window
+            %   Up/Down arrow     — scale amplitude up/down (stagger unchanged)
+            %   Scale +/− buttons — same as Up/Down arrow
+
+            ip = inputParser;
+            ip.addParameter('winSec',  30*60, @isnumeric);
+            ip.addParameter('stagger', 1,     @isnumeric);
+            ip.parse(varargin{:});
+            winSec  = ip.Results.winSec;
+            stagger = ip.Results.stagger;
+
+            assert(~isempty(self.timeSeries), '[plotTimeSeries] timeSeries is empty.');
+            assert(~isempty(self.Fs),         '[plotTimeSeries] Fs is not set.');
+
+            ts       = self.timeSeries;           % [samples x channels]
+            nSamp    = size(ts, 1);
+            nChan    = size(ts, 2);
+            t        = (0:nSamp-1)' / self.Fs / 60;  % minutes
+            totalSec = t(end);                        % now totalMin
+            winSec   = min(winSec / 60, totalSec);    % convert input (seconds) → minutes
+
+            % Z-score per channel
+            mu = mean(ts, 1, 'omitnan');
+            sd = std(ts,  0, 1, 'omitnan');
+            sd(sd == 0) = 1;
+            ts = (ts - mu) ./ sd;
+
+            % Fixed stagger offsets (scale never changes these)
+            offsets = ((nChan-1):-1:0) * stagger;   % 1 x nChan
+
+            % Display decimation — cap main axes at 100,000 rendered points
+            MAX_DISP_SAMP = 100000;
+            dispDec = max(1, floor(nSamp / MAX_DISP_SAMP));
+            if dispDec > 1
+                fprintf('[plotTimeSeries] Display decimated %dx (%d → %d pts).\n', ...
+                    dispDec, nSamp, floor(nSamp/dispDec));
+            end
+            t_disp   = t(1:dispDec:end);
+            ts_base  = ts(1:dispDec:end, :);   % z-scored, decimated — no scale/stagger yet
+
+            scale = 1;   % mutable amplitude scale; stagger is always offsets
+
+            % Channel names
+            if isempty(self.chanNames) || numel(self.chanNames) ~= nChan
+                cNames = arrayfun(@(k) sprintf('Ch%d',k), 1:nChan, 'UniformOutput', false);
+            else
+                cNames = self.chanNames(:)';
+            end
+            [tickVals, tickIdx] = sort(offsets);
+            tickLabels = cNames(tickIdx);
+
+            % ── Figure ──────────────────────────────────────────────────────
+            fig = figure('Name', sprintf('Time Series — %s', self.subj), ...
+                'NumberTitle','off', 'Color','w', ...
+                'Position',[60 60 1340 840], ...
+                'KeyPressFcn',           @onKeyPress, ...
+                'WindowButtonDownFcn',   @onMouseDown, ...
+                'WindowButtonMotionFcn', @onMouseMove, ...
+                'WindowButtonUpFcn',     @onMouseUp);
+
+            % Main axes
+            axMain = axes('Parent', fig, ...
+                'Position', [0.09 0.26 0.89 0.71], ...
+                'Color','w', 'Box','off', 'TickDir','out', 'FontSize',11);
+            hold(axMain, 'on');
+            hLines = plot(axMain, t_disp, ts_base * scale + offsets, ...
+                'Color',[0.15 0.35 0.65], 'LineWidth',0.6);
+            set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels, 'XLim',[0 winSec]);
+
+            % Mini overview axes
+            axMini = axes('Parent', fig, ...
+                'Position', [0.09 0.07 0.89 0.10], ...
+                'Color',[0.94 0.94 0.94], 'Box','off', ...
+                'YColor','none', 'FontSize',9);
+            hold(axMini, 'on');
+            miniDec = max(1, floor(nSamp / 3000));
+            plot(axMini, t(1:miniDec:end), ts(1:miniDec:end,:) + offsets, ...
+                'Color',[0.55 0.55 0.55], 'LineWidth',0.3);
+            xlim(axMini, [0 totalSec]);
+            xlabel(axMini, 'Time (min)');
+
+            % Window indicator patch
+            drawnow limitrate;
+            yl = ylim(axMini);
+            hPatch = patch(axMini, ...
+                [0 winSec winSec 0 0], [yl(1) yl(1) yl(2) yl(2) yl(1)], ...
+                [0.20 0.45 0.85], 'FaceAlpha',0.25, ...
+                'EdgeColor',[0.20 0.45 0.85], 'LineWidth',1.2, 'HitTest','off');
+
+            % Scale buttons
+            uicontrol('Parent',fig, 'Style','pushbutton', 'String','Scale +', ...
+                'Units','normalized', 'Position',[0.09 0.01 0.07 0.04], ...
+                'FontSize',11, 'Callback',@(~,~) changeScale(1.5));
+            uicontrol('Parent',fig, 'Style','pushbutton', 'String','Scale −', ...
+                'Units','normalized', 'Position',[0.17 0.01 0.07 0.04], ...
+                'FontSize',11, 'Callback',@(~,~) changeScale(1/1.5));
+
+            % Drag state
+            isDragging   = false;
+            dragStartX   = 0;
+            dragStartWin = 0;
+
+            % ── Nested callbacks ────────────────────────────────────────────
+            function setWindow(tStart)
+                tStart = max(0, min(tStart, totalSec - winSec));
+                xlim(axMain, [tStart, tStart + winSec]);
+                yl2 = ylim(axMini);
+                hPatch.XData = [tStart tStart+winSec tStart+winSec tStart tStart];
+                hPatch.YData = [yl2(1) yl2(1) yl2(2) yl2(2) yl2(1)];
+            end
+
+            function changeScale(factor)
+                scale = scale * factor;
+                ts_new = ts_base * scale + offsets;
+                for k = 1:nChan
+                    hLines(k).YData = ts_new(:, k);
+                end
+            end
+
+            function onMouseDown(~,~)
+                pt  = get(axMini, 'CurrentPoint');
+                xl  = xlim(axMini);
+                yl2 = ylim(axMini);
+                inMini = pt(1,1) >= xl(1) && pt(1,1) <= xl(2) && ...
+                         pt(1,2) >= yl2(1) && pt(1,2) <= yl2(2);
+                if ~inMini, return; end
+                % Jump window to click point, then begin drag
+                setWindow(pt(1,1) - winSec/2);
+                isDragging   = true;
+                dragStartX   = pt(1,1);
+                dragStartWin = axMain.XLim(1);
+            end
+
+            function onMouseMove(~,~)
+                if ~isDragging, return; end
+                pt = get(axMini, 'CurrentPoint');
+                setWindow(dragStartWin + (pt(1,1) - dragStartX));
+            end
+
+            function onMouseUp(~,~)
+                isDragging = false;
+            end
+
+            function onKeyPress(~, evt)
+                tNow = axMain.XLim(1);
+                switch evt.Key
+                    case 'rightarrow', setWindow(tNow + winSec * 0.25);
+                    case 'leftarrow',  setWindow(tNow - winSec * 0.25);
+                    case 'pagedown',   setWindow(tNow + winSec);
+                    case 'pageup',     setWindow(tNow - winSec);
+                    case 'uparrow',    changeScale(1.5);
+                    case 'downarrow',  changeScale(1/1.5);
+                end
+            end
+
+        end
+
+
     end
 
     methods (Static = true)
