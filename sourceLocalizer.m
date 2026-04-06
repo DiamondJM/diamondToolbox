@@ -1930,7 +1930,8 @@ classdef sourceLocalizer < handle
                 'KeyPressFcn',           @onKeyPress, ...
                 'WindowButtonDownFcn',   @onMouseDown, ...
                 'WindowButtonMotionFcn', @onMouseMove, ...
-                'WindowButtonUpFcn',     @onMouseUp);
+                'WindowButtonUpFcn',     @onMouseUp, ...
+                'WindowScrollWheelFcn',  @onScroll);
 
             % Main axes
             axMain = axes('Parent', fig, ...
@@ -2033,6 +2034,11 @@ classdef sourceLocalizer < handle
 
             function onMouseUp(~,~)
                 isDragging = false;
+            end
+
+            function onScroll(~, evt)
+                tNow = axMain.XLim(1);
+                setWindow(tNow + winSec * 0.1 * evt.VerticalScrollCount);
             end
 
             function onKeyPress(~, evt)
