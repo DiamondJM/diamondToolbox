@@ -2954,11 +2954,14 @@ classdef electrodeLocalizer < handle
             % voxel dim is most aligned with it, then permute accordingly.
             T = info.Transform.T;
             M = abs(T(1:3, 1:3));             % M(dim, axis)
-            [~, perm] = max(M, [], 1);        % perm(axis) = voxel dim most aligned with that axis
-            % Only permute if result is unambiguous (unique dim per axis).
-            % Duplicate indices mean the affine is oblique — no simple
-            % dim reordering applies; the affine already handles it.
-            if ~isequal(perm, [1 2 3]) && numel(unique(perm)) == 3
+            % Use assignment to get a valid bijective mapping even when
+            % max-per-column produces duplicate dim indices (oblique acq).
+            pairs = matchpairs(-M, 0);        % minimise -M = maximise alignment
+            perm  = zeros(1, 3);
+            for kk = 1:size(pairs, 1)
+                perm(pairs(kk, 2)) = pairs(kk, 1);   % perm(axis) = voxel dim
+            end
+            if ~isequal(perm, [1 2 3])
                 fprintf('[loadVolume] Permuting voxel dims [%d %d %d] → canonical [1 2 3].\n', perm);
                 vol              = permute(vol, perm);
                 T_new            = T;
@@ -2966,8 +2969,6 @@ classdef electrodeLocalizer < handle
                 info.Transform.T = T_new;
                 info.PixelDimensions(1:3) = info.PixelDimensions(perm);
                 info.ImageSize(1:3)       = info.ImageSize(perm);
-            elseif numel(unique(perm)) < 3
-                fprintf('[loadVolume] Oblique affine [%d %d %d] — skipping permutation.\n', perm);
             end
         end
 
