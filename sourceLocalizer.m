@@ -12,7 +12,7 @@ classdef sourceLocalizer < handle
         braindata = struct('myBd',[],'myBp',[]);
 
         spikeDetectionResults = struct('rasters',[],'waveforms',[],'paramStruct',struct())
-        seqResults = struct('seriesAll',[],'timesAll',[]);
+        seqResults = struct('seriesAll',[],'timesAll',[],'startEndTime',[]);
         sensors
 
         seizureProcessingResults = struct;
@@ -635,6 +635,8 @@ classdef sourceLocalizer < handle
             seriesAll(:) = {''};
             timesAll = nan(max(winSpkCnt),length(hasSeries));
 
+            startEndTime = nan(2,length(hasSeries));
+
             if isempty(hasSeries); return; end
 
             % For parallel
@@ -734,18 +736,22 @@ classdef sourceLocalizer < handle
 
                 timesAll(:,jj) = currentTimesHolder;
 
+                startEndTime(:,jj) = [totalWindows(1,hasSeries(jj));totalWindows(end,hasSeries(jj))];
+
             end
 
             seriesAll(:,all(isnan(timesAll))) = [];
+            startEndTime(:,all(isnan(timesAll))) = [];
             timesAll(:,all(isnan(timesAll))) = [];
             % For sequences that became too short after accounting for duplicate
             % electrodes
 
-            [seriesAll,timesAll] = self.removeDuplicates(seriesAll,timesAll);
+            [seriesAll,timesAll,startEndTime] = self.removeDuplicates(seriesAll,timesAll,startEndTime);
             % For duplicate SEQUENCES, big difference
 
             self.seqResults.seriesAll = seriesAll;
             self.seqResults.timesAll = timesAll;
+            self.seqResults.startEndTime = startEndTime;
 
         end
 
@@ -1811,8 +1817,9 @@ classdef sourceLocalizer < handle
             %
             % Usage:
             %   sl.plotTimeSeries()
-            %   sl.plotTimeSeries('winSec', 1800)   % 30-min window (default)
-            %   sl.plotTimeSeries('stagger', 1)     % z-score unit spacing (default)
+            %   sl.plotTimeSeries('winSec', 1800)     % 30-min window (default)
+            %   sl.plotTimeSeries('stagger', 1)       % z-score unit spacing (default)
+            %   sl.plotTimeSeries('showSeq', false)   % disable sequence overlay (default on)
             %
             % Navigation:
             %   Drag the blue window on the mini overview to scroll
@@ -1820,13 +1827,19 @@ classdef sourceLocalizer < handle
             %   PageUp/PageDown   — scroll one full window
             %   Up/Down arrow     — scale amplitude up/down (stagger unchanged)
             %   Scale +/− buttons — same as Up/Down arrow
+            %
+            % Sequence overlay (when showSeq=true and seqResults is populated):
+            %   Shaded band for each detected sequence (startEndTime window)
+            %   Dots at the signal minimum for each participating channel
 
             ip = inputParser;
             ip.addParameter('winSec',  30*60, @isnumeric);
             ip.addParameter('stagger', 1,     @isnumeric);
+            ip.addParameter('showSeq', true,  @islogical);
             ip.parse(varargin{:});
             winSec  = ip.Results.winSec;
             stagger = ip.Results.stagger;
+            showSeq = ip.Results.showSeq;
 
             assert(~isempty(self.timeSeries), '[plotTimeSeries] timeSeries is empty.');
             assert(~isempty(self.Fs),         '[plotTimeSeries] Fs is not set.');
@@ -1868,6 +1881,48 @@ classdef sourceLocalizer < handle
             [tickVals, tickIdx] = sort(offsets);
             tickLabels = cNames(tickIdx);
 
+            % ── Sequence overlay data ────────────────────────────────────────
+            % Pre-compute patch times and dot positions (scale-dependent y computed
+            % at draw time and updated on changeScale).
+            seqPatchTimes = zeros(0,2);   % [nSeq x 2] start/end in minutes
+            dotTimes      = zeros(1,0);   % x positions (minutes)
+            dotSigBase    = zeros(1,0);   % z-scored signal value at dot (no scale, no offset)
+            dotOffsets    = zeros(1,0);   % channel stagger offset for each dot
+
+            hasSeq = showSeq && isfield(self.seqResults,'startEndTime') && ...
+                     ~isempty(self.seqResults.startEndTime);
+            if hasSeq
+                SET   = self.seqResults.startEndTime;   % 2 x nSeq  (samples)
+                sAll  = self.seqResults.seriesAll;       % maxLen x nSeq
+                tAll  = self.seqResults.timesAll;        % maxLen x nSeq  (samples, first abs + diffs)
+                nSeq  = size(SET, 2);
+
+                seqPatchTimes = SET' / self.Fs / 60;    % nSeq x 2, minutes
+
+                for jj = 1:nSeq
+                    col = sAll(:, jj);
+                    col = col(~cellfun(@isempty, col));
+                    nContacts = numel(col);
+                    if nContacts == 0, continue; end
+
+                    % Reconstruct absolute sample times (first entry is absolute,
+                    % remaining are diffs)
+                    absSamples = cumsum(tAll(1:nContacts, jj));
+
+                    for kk = 1:nContacts
+                        chanIdx = find(strcmp(cNames, col{kk}), 1);
+                        if isempty(chanIdx), continue; end
+
+                        tMin = absSamples(kk) / self.Fs / 60;
+                        [~, dispIdx] = min(abs(t_disp - tMin));
+
+                        dotTimes(end+1)   = tMin;
+                        dotSigBase(end+1) = ts_base(dispIdx, chanIdx);
+                        dotOffsets(end+1) = offsets(chanIdx);
+                    end
+                end
+            end
+
             % ── Figure ──────────────────────────────────────────────────────
             fig = figure('Name', sprintf('Time Series — %s', self.subj), ...
                 'NumberTitle','off', 'Color','w', ...
@@ -1882,8 +1937,24 @@ classdef sourceLocalizer < handle
                 'Position', [0.09 0.26 0.89 0.71], ...
                 'Color','w', 'Box','off', 'TickDir','out', 'FontSize',11);
             hold(axMain, 'on');
+
+            % Sequence shaded windows (drawn first so traces appear on top)
+            for jj = 1:size(seqPatchTimes, 1)
+                t0 = seqPatchTimes(jj,1);  t1 = seqPatchTimes(jj,2);
+                patch(axMain, [t0 t1 t1 t0], [-1e4 -1e4 1e4 1e4], ...
+                    [1 0.55 0.1], 'FaceAlpha',0.15, 'EdgeColor','none', 'HitTest','off');
+            end
+
             hLines = plot(axMain, t_disp, ts_base * scale + offsets, ...
                 'Color',[0.15 0.35 0.65], 'LineWidth',0.6);
+
+            % Sequence dots
+            hSeqDots = [];
+            if ~isempty(dotTimes)
+                hSeqDots = scatter(axMain, dotTimes, dotSigBase * scale + dotOffsets, ...
+                    40, [0.85 0.2 0], 'filled', 'HitTest','off');
+            end
+
             set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels, 'XLim',[0 winSec]);
 
             % Mini overview axes
@@ -1934,6 +2005,9 @@ classdef sourceLocalizer < handle
                 for k = 1:nChan
                     hLines(k).YData = ts_new(:, k);
                 end
+                if ~isempty(hSeqDots) && isvalid(hSeqDots)
+                    hSeqDots.YData = dotSigBase * scale + dotOffsets;
+                end
             end
 
             function onMouseDown(~,~)
@@ -1979,7 +2053,7 @@ classdef sourceLocalizer < handle
 
     methods (Static = true)
 
-        function [spkLeads,spkTimes] = removeDuplicates(spkLeads,spkTimes)
+        function [spkLeads,spkTimes,startEndTime] = removeDuplicates(spkLeads,spkTimes,startEndTime)
 
             seriesMap = containers.Map('keyType','char','valueType','any');
             for jj = 1:size(spkTimes,2)
@@ -2028,6 +2102,7 @@ classdef sourceLocalizer < handle
             fprintf('%.2f%% of series removed as duplicates.\n',length(removeIndices) / size(spkLeads,2) * 100);
             spkLeads(:,removeIndices) = [];
             spkTimes(:,removeIndices) = [];
+            startEndTime(:,removeIndices) = [];
             % overallInds(removeIndices) = [];
 
             % warning('Remove duplicates done. Placing this warning so if we see it multiple times, we know this function is being called redundantly.');
