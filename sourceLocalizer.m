@@ -361,7 +361,7 @@ classdef sourceLocalizer < handle
                 'maxNegPeakWidth',20 * 60,... % 20 minutes, in seconds 
                 'peakWin',10 * 60,... % 10 minutes, in seconds 
                 'zThresh',1,... % Sigma
-                'ampScale',3); % Sigma  
+                'ampScale',2); % Sigma  
 
             fprintf('Calling spike detector with the following parameters. These are adjustable.\n');
             disp(self.spikeDetectionResults.paramStruct);
@@ -403,6 +403,7 @@ classdef sourceLocalizer < handle
             ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
 
             ctsThresh = 0;
+            zThreshPeak = 0.25; 
 
             % If you choose to mess around with ctsThresh or other
             % 'non-reported' parameters, feel free to pass them back with
@@ -432,7 +433,7 @@ classdef sourceLocalizer < handle
             fullRaster = sparse(tsDims(1),tsDims(2));
             waveformsMaster = cell(1,tsDims(2));
 
-            parfor(kk=1:length(self.chanNames))
+            for(kk=1:length(self.chanNames))
 
                 warning('off','signal:findpeaks:largeMinPeakHeight');
                 % Once for each worker 
@@ -443,7 +444,9 @@ classdef sourceLocalizer < handle
                 %% Peaks and troughs
 
                 xCurrent = thisTs(:,kk);
-                [pHeight,pInd] = findpeaks(xCurrent,'MinPeakHeight',zThresh,'MinPeakHeight',0); 
+                % [pHeight,pInd] = findpeaks(xCurrent,'MinPeakProminence',zThreshPeak); 
+                [~,pInd,~,pHeight] = findpeaks(xCurrent,'MinPeakProminence',zThreshPeak);
+                % Using prominence...
 
                 % isBad = pHeight > maxPeakHeight;
                 % pHeight(isBad) = [];
@@ -1119,7 +1122,7 @@ classdef sourceLocalizer < handle
             subsensorLength = self.sourceLocalizationResults.paramStruct.subsensorLength;
             perceivedActualCutoff = 0.9;
 
-            parfor jj = 1:lengthData
+            for jj = 1:lengthData
 
                 locTemp = nan(3,1);
 
