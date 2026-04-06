@@ -22,6 +22,8 @@ classdef sourceLocalizer < handle
 
         deltaPosition
 
+        timeSeries
+
     end
 
     properties (Hidden = true, Transient = true)
@@ -32,7 +34,6 @@ classdef sourceLocalizer < handle
 
     properties (Transient = true)
 
-        timeSeries
         geodesic
 
     end
@@ -1989,6 +1990,7 @@ classdef sourceLocalizer < handle
 
             % Drag state
             isDragging   = false;
+            dragSource   = '';    % 'mini' or 'main'
             dragStartX   = 0;
             dragStartWin = 0;
 
@@ -2013,27 +2015,47 @@ classdef sourceLocalizer < handle
             end
 
             function onMouseDown(~,~)
+                % Check mini axes first
                 pt  = get(axMini, 'CurrentPoint');
                 xl  = xlim(axMini);
                 yl2 = ylim(axMini);
-                inMini = pt(1,1) >= xl(1) && pt(1,1) <= xl(2) && ...
-                         pt(1,2) >= yl2(1) && pt(1,2) <= yl2(2);
-                if ~inMini, return; end
-                % Jump window to click point, then begin drag
-                setWindow(pt(1,1) - winSec/2);
-                isDragging   = true;
-                dragStartX   = pt(1,1);
-                dragStartWin = axMain.XLim(1);
+                if pt(1,1) >= xl(1) && pt(1,1) <= xl(2) && ...
+                   pt(1,2) >= yl2(1) && pt(1,2) <= yl2(2)
+                    setWindow(pt(1,1) - winSec/2);
+                    isDragging   = true;
+                    dragSource   = 'mini';
+                    dragStartX   = pt(1,1);
+                    dragStartWin = axMain.XLim(1);
+                    return;
+                end
+                % Check main axes
+                pt  = get(axMain, 'CurrentPoint');
+                xl  = xlim(axMain);
+                yl2 = ylim(axMain);
+                if pt(1,1) >= xl(1) && pt(1,1) <= xl(2) && ...
+                   pt(1,2) >= yl2(1) && pt(1,2) <= yl2(2)
+                    isDragging   = true;
+                    dragSource   = 'main';
+                    dragStartX   = pt(1,1);
+                    dragStartWin = axMain.XLim(1);
+                end
             end
 
             function onMouseMove(~,~)
                 if ~isDragging, return; end
-                pt = get(axMini, 'CurrentPoint');
-                setWindow(dragStartWin + (pt(1,1) - dragStartX));
+                if strcmp(dragSource, 'mini')
+                    pt = get(axMini, 'CurrentPoint');
+                    setWindow(dragStartWin + (pt(1,1) - dragStartX));
+                else
+                    pt = get(axMain, 'CurrentPoint');
+                    % Dragging right pulls content right → window moves left
+                    setWindow(dragStartWin - (pt(1,1) - dragStartX));
+                end
             end
 
             function onMouseUp(~,~)
                 isDragging = false;
+                dragSource = '';
             end
 
             function onScroll(~, evt)
