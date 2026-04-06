@@ -353,11 +353,11 @@ classdef sourceLocalizer < handle
             %% Define parameters
 
             self.spikeDetectionResults.paramStruct = struct(...
-                'seqWin',20 * 60,... 20 minutes, in seconds
-                'maxNegPeakWidth',20 * 60,... % 20 minutes, in seconds 
+                'seqWin',10 * 60,... 10 minutes, in seconds
+                'maxNegPeakWidth',10 * 60,... % 10 minutes, in seconds 
                 'peakWin',10 * 60,... % 10 minutes, in seconds 
                 'zThresh',1,... % Sigma
-                'ampScale',2); % Sigma  
+                'ampScale',1); % Sigma  
 
             fprintf('Calling spike detector with the following parameters. These are adjustable.\n');
             disp(self.spikeDetectionResults.paramStruct);
@@ -400,6 +400,7 @@ classdef sourceLocalizer < handle
 
             ctsThresh = 0;
             zThreshPeak = 0.25; 
+            minNegPeakWidth = 2 * 60 * self.Fs; % 1 minute, in samples
 
             % If you choose to mess around with ctsThresh or other
             % 'non-reported' parameters, feel free to pass them back with
@@ -448,7 +449,7 @@ classdef sourceLocalizer < handle
                 % pHeight(isBad) = [];
                 % pInd(isBad) = [];
 
-                [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakHeight',zThresh,'MaxPeakWidth',maxNegPeakWidth,'minPeakDistance',negPeakSeparation);
+                [nHeight,nInd]=findpeaks(-xCurrent,'MinPeakHeight',zThresh,'MaxPeakWidth',maxNegPeakWidth,'MinPeakWidth',minNegPeakWidth,'MinPeakDistance',negPeakSeparation);
 
                 isBad = false(size(nHeight));
                 nHeight(isBad) = [];
@@ -701,6 +702,8 @@ classdef sourceLocalizer < handle
 
             [seriesAll,timesAll,startEndTime] = self.removeDuplicates(seriesAll,timesAll,startEndTime);
             % For duplicate SEQUENCES, big difference
+
+            fprintf('%d total sequences found after removing duplicates. \n',size(timesAll,2)); 
 
             self.seqResults.seriesAll = seriesAll;
             self.seqResults.timesAll = timesAll;
@@ -1118,7 +1121,7 @@ classdef sourceLocalizer < handle
             subsensorLength = self.sourceLocalizationResults.paramStruct.subsensorLength;
             perceivedActualCutoff = 0.9;
 
-            for jj = 1:lengthData
+            parfor jj = 1:lengthData
 
                 locTemp = nan(3,1);
 
@@ -1670,6 +1673,15 @@ classdef sourceLocalizer < handle
             sd(sd == 0) = 1;
             ts = (ts - mu) ./ sd;
 
+            % Valid time range — crop mini overview to first/last non-NaN sample
+            validMask  = any(~isnan(ts), 2);
+            validIdx   = find(validMask);
+            if isempty(validIdx)
+                tValid = [0, totalSec];
+            else
+                tValid = [t(validIdx(1)), t(validIdx(end))];
+            end
+
             % Fixed stagger offsets (scale never changes these)
             offsets = ((nChan-1):-1:0) * stagger;   % 1 x nChan
 
@@ -1770,7 +1782,7 @@ classdef sourceLocalizer < handle
                     40, [0.85 0.2 0], 'filled', 'HitTest','off');
             end
 
-            set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels);
+            set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels, 'XLim',[tValid(1), tValid(1)+winSec]);
 
             % Mini overview axes
             axMini = axes('Parent', fig, ...
@@ -1781,14 +1793,14 @@ classdef sourceLocalizer < handle
             miniDec = max(1, floor(nSamp / 3000));
             plot(axMini, t(1:miniDec:end), ts(1:miniDec:end,:) + offsets, ...
                 'Color',[0.55 0.55 0.55], 'LineWidth',0.3);
-            xlim(axMini, [0 totalSec]);
+            xlim(axMini, tValid);
             xlabel(axMini, 'Time (min)');
 
             % Window indicator patch
             drawnow limitrate;
             yl = ylim(axMini);
             hPatch = patch(axMini, ...
-                [0 winSec winSec 0 0], [yl(1) yl(1) yl(2) yl(2) yl(1)], ...
+                [tValid(1) tValid(1)+winSec tValid(1)+winSec tValid(1) tValid(1)], [yl(1) yl(1) yl(2) yl(2) yl(1)], ...
                 [0.20 0.45 0.85], 'FaceAlpha',0.25, ...
                 'EdgeColor',[0.20 0.45 0.85], 'LineWidth',1.2, 'HitTest','off');
 
@@ -1810,7 +1822,7 @@ classdef sourceLocalizer < handle
 
             % ── Nested callbacks ────────────────────────────────────────────
             function setWindow(tStart)
-                tStart = max(0, min(tStart, totalSec - winSec));
+                tStart = max(tValid(1), min(tStart, tValid(2) - winSec));
                 xlim(axMain, [tStart, tStart + winSec]);
                 yl2 = ylim(axMini);
                 hPatch.XData = [tStart tStart+winSec tStart+winSec tStart tStart];
