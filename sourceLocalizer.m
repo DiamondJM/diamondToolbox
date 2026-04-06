@@ -1914,11 +1914,11 @@ classdef sourceLocalizer < handle
                         chanIdx = find(strcmp(cNames, col{kk}), 1);
                         if isempty(chanIdx), continue; end
 
-                        tMin = absSamples(kk) / self.Fs / 60;
-                        [~, dispIdx] = min(abs(t_disp - tMin));
+                        tMin    = absSamples(kk) / self.Fs / 60;
+                        smpIdx  = min(max(round(absSamples(kk)), 1), size(ts, 1));
 
                         dotTimes(end+1)   = tMin;
-                        dotSigBase(end+1) = ts_base(dispIdx, chanIdx);
+                        dotSigBase(end+1) = ts(smpIdx, chanIdx);
                         dotOffsets(end+1) = offsets(chanIdx);
                     end
                 end
