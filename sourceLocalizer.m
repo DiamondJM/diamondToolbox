@@ -1862,7 +1862,7 @@ classdef sourceLocalizer < handle
             offsets = ((nChan-1):-1:0) * stagger;   % 1 x nChan
 
             % Display decimation — cap main axes at 100,000 rendered points
-            MAX_DISP_SAMP = 100000;
+            MAX_DISP_SAMP = 500000;
             dispDec = max(1, floor(nSamp / MAX_DISP_SAMP));
             if dispDec > 1
                 fprintf('[plotTimeSeries] Display decimated %dx (%d → %d pts).\n', ...
@@ -1914,11 +1914,11 @@ classdef sourceLocalizer < handle
                         chanIdx = find(strcmp(cNames, col{kk}), 1);
                         if isempty(chanIdx), continue; end
 
-                        tMin    = absSamples(kk) / self.Fs / 60;
-                        smpIdx  = min(max(round(absSamples(kk)), 1), size(ts, 1));
+                        tMin = absSamples(kk) / self.Fs / 60;
+                        [~, dispIdx] = min(abs(t_disp - tMin));
 
-                        dotTimes(end+1)   = tMin;
-                        dotSigBase(end+1) = ts(smpIdx, chanIdx);
+                        dotTimes(end+1)   = t_disp(dispIdx);
+                        dotSigBase(end+1) = ts_base(dispIdx, chanIdx);
                         dotOffsets(end+1) = offsets(chanIdx);
                     end
                 end
