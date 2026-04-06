@@ -2954,7 +2954,13 @@ classdef electrodeLocalizer < handle
             % voxel dim is most aligned with it, then permute accordingly.
             T = info.Transform.T;
             M = abs(T(1:3, 1:3));             % M(dim, axis)
-            [~, perm] = max(M, [], 1);        % perm(axis) = voxel dim most aligned with that axis
+            % Solve as assignment problem so each voxel dim is claimed by
+            % exactly one anatomical axis (max independently can repeat).
+            pairs = matchpairs(-M, 0);        % minimise -M = maximise alignment
+            perm  = zeros(1, 3);
+            for kk = 1:size(pairs, 1)
+                perm(pairs(kk, 2)) = pairs(kk, 1);   % perm(axis) = voxel dim
+            end
             if ~isequal(perm, [1 2 3])
                 fprintf('[loadVolume] Permuting voxel dims [%d %d %d] → canonical [1 2 3].\n', perm);
                 vol              = permute(vol, perm);
