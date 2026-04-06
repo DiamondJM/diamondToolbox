@@ -129,7 +129,7 @@ classdef sourceLocalizer < handle
             %
             % Dismiss the dialog to abort without changes.
 
-            [ts, Fs, chanNamesFromFile] = sourceLocalizer.loadTimeSeriesFromFile();
+            [ts, Fs, chanNamesFromFile] = sourceLocalizer.loadTimeSeriesFromFile(self.chanNames);
 
             if isempty(ts)
                 fprintf('[sourceLocalizer] No time series loaded.\n');
@@ -2385,15 +2385,20 @@ classdef sourceLocalizer < handle
             chanNames = chanNames(:);
         end
 
-        function [timeSeries, Fs, chanNames] = loadTimeSeriesFromFile()
+        function [timeSeries, Fs, chanNames] = loadTimeSeriesFromFile(selectedChannels)
             % Prompt the user to select a time series file and return its
             % contents. Returns empty arrays if the dialog is dismissed.
+            %
+            % selectedChannels — optional cell array of channel names to load.
+            %   For EDF files, only those signals are read from disk (faster).
+            %   Pass {} or omit to load all channels.
             %
             % Returns:
             %   timeSeries  [samples x channels] double
             %   Fs          scalar sampling frequency (Hz)
             %   chanNames   m x 1 cell array of channel name strings
             %               (empty cell if the file provides none)
+            if nargin < 1, selectedChannels = {}; end
 
             timeSeries = [];
             Fs         = [];
@@ -2428,7 +2433,7 @@ classdef sourceLocalizer < handle
                 case '.mat'
                     [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromMat(fullPath);
                 case '.edf'
-                    [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromEdf(fullPath);
+                    [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromEdf(fullPath, selectedChannels);
                 case '.fif'
                     [timeSeries, Fs, chanNames] = sourceLocalizer.loadTsFromFif(fullPath);
                 otherwise
@@ -2496,33 +2501,64 @@ classdef sourceLocalizer < handle
             end
         end
 
-        function [ts, Fs, chanNames] = loadTsFromEdf(fullPath)
+        function [ts, Fs, chanNames] = loadTsFromEdf(fullPath, selectedChannels)
             % Load time series from an EDF file.
             % Requires MATLAB R2020b+ Signal Processing Toolbox (edfread/edfinfo).
+            %
+            % selectedChannels — optional cell array of signal label strings.
+            %   When provided, only those channels are read from disk via
+            %   edfread 'SelectedSignals', which is significantly faster for
+            %   large EDF files with many unused channels.
+            if nargin < 2, selectedChannels = {}; end
 
             assert(exist('edfread', 'file') == 2, ...
                 ['edfread not found. EDF import requires MATLAB R2020b+ with the ' ...
                  'Signal Processing Toolbox.']);
 
             % Use edfinfo for metadata — returns a stable struct across versions
-            info      = edfinfo(fullPath);
-            Fs        = double(info.NumSamples(1)) / seconds(info.DataRecordDuration);
-            chanNames = cellstr(info.SignalLabels);
+            info         = edfinfo(fullPath);
+            Fs           = double(info.NumSamples(1)) / seconds(info.DataRecordDuration);
+            allChanNames = cellstr(info.SignalLabels);
+
+            % Resolve which channels to load
+            if ~isempty(selectedChannels)
+                [mask, ~] = ismember(strtrim(selectedChannels), strtrim(allChanNames));
+                if ~all(mask)
+                    missing = selectedChannels(~mask);
+                    warning('[loadTsFromEdf] %d requested channel(s) not found in EDF: %s', ...
+                        sum(~mask), strjoin(missing, ', '));
+                end
+                toLoad    = selectedChannels(mask);
+                chanNames = toLoad(:);
+                fprintf('[loadTsFromEdf] Loading %d of %d channels from EDF (subset via chanNames).\n', ...
+                    numel(toLoad), numel(allChanNames));
+            else
+                toLoad    = {};
+                chanNames = allChanNames;
+            end
 
             % Use edfread for data — API varies by MATLAB version
             try
                 % R2021b+: 'OutputFormat','array' returns [nSamples x nChan] double
-                data = edfread(fullPath, 'OutputFormat', 'array');
-                ts   = double(data);
+                if ~isempty(toLoad)
+                    data = edfread(fullPath, 'SelectedSignals', toLoad, 'OutputFormat', 'array');
+                else
+                    data = edfread(fullPath, 'OutputFormat', 'array');
+                end
+                ts = double(data);
             catch
                 % R2020b fallback: returns timetable with one cell per record per channel
-                tbl     = edfread(fullPath);
-                nChan   = width(tbl);
-                cols    = cell(1, nChan);
-                for c = 1:nChan
-                    cols{c} = vertcat(tbl{:, c}{:});   % concatenate records
+                if ~isempty(toLoad)
+                    tbl = edfread(fullPath, 'SelectedSignals', toLoad);
+                else
+                    tbl = edfread(fullPath);
                 end
-                ts = double(horzcat(cols{:}));          % [nSamples x nChan]
+                nChan = width(tbl);
+                cols  = cell(1, nChan);
+                for c = 1:nChan
+                    cols{c} = vertcat(tbl{:, c}{:});
+                end
+                ts = double(horzcat(cols{:}));
             end
         end
 
