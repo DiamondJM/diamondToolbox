@@ -1941,8 +1941,9 @@ classdef sourceLocalizer < handle
             % Sequence shaded windows (drawn first so traces appear on top)
             for jj = 1:size(seqPatchTimes, 1)
                 t0 = seqPatchTimes(jj,1);  t1 = seqPatchTimes(jj,2);
-                patch(axMain, [t0 t1 t1 t0], [-1e4 -1e4 1e4 1e4], ...
+                hp = patch(axMain, [t0 t1 t1 t0], [-1e4 -1e4 1e4 1e4], ...
                     [1 0.55 0.1], 'FaceAlpha',0.15, 'EdgeColor','none', 'HitTest','off');
+                hp.YLimInclude = 'off';
             end
 
             hLines = plot(axMain, t_disp, ts_base * scale + offsets, ...
