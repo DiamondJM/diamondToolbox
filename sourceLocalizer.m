@@ -1836,16 +1836,11 @@ classdef sourceLocalizer < handle
             ip = inputParser;
             ip.addParameter('winSec',  1,     @isnumeric);
             ip.addParameter('stagger', 1,     @isnumeric);
-            ip.addParameter('showSeq', true,  @islogical);
+            ip.addParameter('showSeq', ~strcmp(self.localizationMode,'seizure'), @islogical);
             ip.parse(varargin{:});
             winSec  = ip.Results.winSec;
             stagger = ip.Results.stagger;
             showSeq = ip.Results.showSeq;
-
-            if showSeq && strcmp(self.localizationMode, 'seizure')
-                fprintf('[plotTimeSeries] showSeq not supported in seizure mode — disabling.\n');
-                showSeq = false;
-            end
 
             assert(~isempty(self.timeSeries), '[plotTimeSeries] timeSeries is empty.');
             assert(~isempty(self.Fs),         '[plotTimeSeries] Fs is not set.');
