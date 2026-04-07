@@ -1663,7 +1663,7 @@ classdef sourceLocalizer < handle
             ts       = self.timeSeries;           % [samples x channels]
             nSamp    = size(ts, 1);
             nChan    = size(ts, 2);
-            t        = (0:nSamp-1)' / self.Fs / 60;  % minutes
+            t        = (1:nSamp)' / self.Fs / 60;  % minutes
             totalSec = t(end);                        % now totalMin
             winSec   = min(winSec / 60, totalSec);    % convert input (seconds) → minutes
 
