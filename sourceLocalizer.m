@@ -1818,7 +1818,7 @@ classdef sourceLocalizer < handle
             %
             % Usage:
             %   sl.plotTimeSeries()
-            %   sl.plotTimeSeries('winSec', 1800)     % 30-min window (default)
+            %   sl.plotTimeSeries('winSec', 1)         % 1-sec window (default)
             %   sl.plotTimeSeries('stagger', 1)       % z-score unit spacing (default)
             %   sl.plotTimeSeries('showSeq', false)   % disable sequence overlay (default on)
             %
@@ -1834,13 +1834,18 @@ classdef sourceLocalizer < handle
             %   Dots at the signal minimum for each participating channel
 
             ip = inputParser;
-            ip.addParameter('winSec',  30*60, @isnumeric);
+            ip.addParameter('winSec',  1,     @isnumeric);
             ip.addParameter('stagger', 1,     @isnumeric);
             ip.addParameter('showSeq', true,  @islogical);
             ip.parse(varargin{:});
             winSec  = ip.Results.winSec;
             stagger = ip.Results.stagger;
             showSeq = ip.Results.showSeq;
+
+            if showSeq && strcmp(self.localizationMode, 'seizure')
+                fprintf('[plotTimeSeries] showSeq not supported in seizure mode — disabling.\n');
+                showSeq = false;
+            end
 
             assert(~isempty(self.timeSeries), '[plotTimeSeries] timeSeries is empty.');
             assert(~isempty(self.Fs),         '[plotTimeSeries] Fs is not set.');
@@ -1958,7 +1963,7 @@ classdef sourceLocalizer < handle
                     40, [0.85 0.2 0], 'filled', 'HitTest','off');
             end
 
-            set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels, 'XLim',[0 winSec]);
+            set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels);
 
             % Mini overview axes
             axMini = axes('Parent', fig, ...
@@ -1994,6 +1999,8 @@ classdef sourceLocalizer < handle
             dragStartX   = 0;
             dragStartWin = 0;
 
+            setWindow(0);   % initialise XLim + XTick
+
             % ── Nested callbacks ────────────────────────────────────────────
             function setWindow(tStart)
                 tStart = max(0, min(tStart, totalSec - winSec));
@@ -2001,6 +2008,11 @@ classdef sourceLocalizer < handle
                 yl2 = ylim(axMini);
                 hPatch.XData = [tStart tStart+winSec tStart+winSec tStart tStart];
                 hPatch.YData = [yl2(1) yl2(1) yl2(2) yl2(2) yl2(1)];
+                % Ticks every 100 ms
+                tickStep = 0.1 / 60;   % 100 ms in minutes
+                ticks    = (ceil(tStart / tickStep) * tickStep) : tickStep : (tStart + winSec);
+                set(axMain, 'XTick', ticks, ...
+                    'XTickLabel', arrayfun(@(x) sprintf('%.3gs', x*60), ticks, 'UniformOutput', false));
             end
 
             function changeScale(factor)
