@@ -1549,6 +1549,22 @@ classdef sourceLocalizer < handle
 
         end
 
+        function [maxRoic,roicTable] = findTopRoic(self)
+            vertexMap = self.sourceLocalizationResults.roiResults.vertexMap{1};
+            roicTable = zeros(length(vertexMap),3);
+            if isempty(vertexMap); maxRoic = nan; return; end
+            mapKeys = cell2mat(vertexMap.keys);
+            for ii = 1:length(mapKeys)
+                roiStruct = vertexMap(mapKeys(ii));
+                roicTable(ii,1) = mapKeys(ii);
+                roicTable(ii,2) = roiStruct.count;
+                if isfield(roiStruct,'times'); roicTable(ii,3) = mean(roiStruct.times); end
+            end
+            [~,inds] = sort(roicTable(:,2),'descend');
+            roicTable = roicTable(inds,:);
+            maxRoic = roicTable(1,1);
+        end
+
         function plotSurfFun(self)
 
             % p = inputParser;
