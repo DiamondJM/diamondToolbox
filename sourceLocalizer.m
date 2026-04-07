@@ -1594,7 +1594,7 @@ classdef sourceLocalizer < handle
             % clim = roiResults.clim;
 
             maxColor = max(self.sourceLocalizationResults.roiResults.maxValAll); 
-            colorLimits = [0 max(maxColor)];
+            colorLimits = [1 max(maxColor)];
 
             %% Plot what we have
 
