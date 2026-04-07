@@ -1796,9 +1796,17 @@ classdef sourceLocalizer < handle
             xlim(axMini, tValid);
             xlabel(axMini, 'Time (min)');
 
-            % Window indicator patch
+            % Sequence stripes in mini overview
             drawnow limitrate;
             yl = ylim(axMini);
+            for jj = 1:size(seqPatchTimes, 1)
+                t0 = seqPatchTimes(jj,1);  t1 = seqPatchTimes(jj,2);
+                hp = patch(axMini, [t0 t1 t1 t0], [yl(1) yl(1) yl(2) yl(2)], ...
+                    [1 0.55 0.1], 'FaceAlpha',0.35, 'EdgeColor','none', 'HitTest','off');
+                hp.YLimInclude = 'off';
+            end
+
+            % Window indicator patch
             hPatch = patch(axMini, ...
                 [tValid(1) tValid(1)+winSec tValid(1)+winSec tValid(1) tValid(1)], [yl(1) yl(1) yl(2) yl(2) yl(1)], ...
                 [0.20 0.45 0.85], 'FaceAlpha',0.25, ...
