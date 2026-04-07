@@ -284,9 +284,9 @@ classdef sourceLocalizer < handle
             %% Plot
 
             if ~plotting; return; end
-            % self.plotSurfFun;
+            self.plotSurfFun;
 
-            self.plotDimensionsReducedWrapper; 
+            % self.plotDimensionsReducedWrapper; 
 
         end
 
