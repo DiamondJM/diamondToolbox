@@ -97,6 +97,7 @@ classdef sourceLocalizer < handle
             end
 
             %% Pull braindata
+            
             self.retrieveBraindata;
 
         end
@@ -1641,7 +1642,7 @@ classdef sourceLocalizer < handle
             %
             % Usage:
             %   sl.plotTimeSeries()
-            %   sl.plotTimeSeries('winSec', 1)         % 1-sec window (default)
+            %   sl.plotTimeSeries('winSec', 1800)     % 30-min window (default)
             %   sl.plotTimeSeries('stagger', 1)       % z-score unit spacing (default)
             %   sl.plotTimeSeries('showSeq', false)   % disable sequence overlay (default on)
             %
@@ -1657,9 +1658,9 @@ classdef sourceLocalizer < handle
             %   Dots at the signal minimum for each participating channel
 
             ip = inputParser;
-            ip.addParameter('winSec',  1,     @isnumeric);
+            ip.addParameter('winSec',  30*60, @isnumeric);
             ip.addParameter('stagger', 1,     @isnumeric);
-            ip.addParameter('showSeq', ~strcmp(self.localizationMode,'seizure'), @islogical);
+            ip.addParameter('showSeq', true);
             ip.parse(varargin{:});
             winSec  = ip.Results.winSec;
             stagger = ip.Results.stagger;
