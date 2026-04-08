@@ -1650,13 +1650,15 @@ classdef sourceLocalizer < handle
             %   Dots at the signal minimum for each participating channel
 
             ip = inputParser;
-            ip.addParameter('winSec',  30*60, @isnumeric);
-            ip.addParameter('stagger', 1,     @isnumeric);
-            ip.addParameter('showSeq', true);
+            ip.addParameter('winSec',        30*60,  @isnumeric);
+            ip.addParameter('stagger',       1,      @isnumeric);
+            ip.addParameter('showSeq',       true);
+            ip.addParameter('startDatetime', [],     @(x) isempty(x) || isa(x,'datetime'));
             ip.parse(varargin{:});
-            winSec  = ip.Results.winSec;
-            stagger = ip.Results.stagger;
-            showSeq = ip.Results.showSeq;
+            winSec        = ip.Results.winSec;
+            stagger       = ip.Results.stagger;
+            showSeq       = ip.Results.showSeq;
+            startDatetime = ip.Results.startDatetime;
 
             assert(~isempty(self.timeSeries), '[plotTimeSeries] timeSeries is empty.');
             assert(~isempty(self.Fs),         '[plotTimeSeries] Fs is not set.');
@@ -1839,8 +1841,15 @@ classdef sourceLocalizer < handle
                 % Ticks every 5 minutes
                 tickStep = 5;   % minutes
                 ticks    = (ceil(tStart / tickStep) * tickStep) : tickStep : (tStart + winSec);
-                set(axMain, 'XTick', ticks, ...
-                    'XTickLabel', arrayfun(@(x) sprintf('%g min', x), ticks, 'UniformOutput', false));
+                if ~isempty(startDatetime)
+                    tickDt = startDatetime + minutes(ticks);
+                    tickLabels_x = arrayfun(@(dt) sprintf('%s\n%s', ...
+                        datestr(dt, 'mm/dd/yy'), datestr(dt, 'HH:MM')), ...
+                        tickDt, 'UniformOutput', false);
+                else
+                    tickLabels_x = arrayfun(@(x) sprintf('%g min', x), ticks, 'UniformOutput', false);
+                end
+                set(axMain, 'XTick', ticks, 'XTickLabel', tickLabels_x);
             end
 
             function changeScale(factor)
