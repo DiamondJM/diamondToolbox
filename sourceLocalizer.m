@@ -1836,11 +1836,11 @@ classdef sourceLocalizer < handle
                 yl2 = ylim(axMini);
                 hPatch.XData = [tStart tStart+winSec tStart+winSec tStart tStart];
                 hPatch.YData = [yl2(1) yl2(1) yl2(2) yl2(2) yl2(1)];
-                % Ticks every 100 ms
-                tickStep = 0.1 / 60;   % 100 ms in minutes
+                % Ticks every 5 minutes
+                tickStep = 5;   % minutes
                 ticks    = (ceil(tStart / tickStep) * tickStep) : tickStep : (tStart + winSec);
                 set(axMain, 'XTick', ticks, ...
-                    'XTickLabel', arrayfun(@(x) sprintf('%.3gs', x*60), ticks, 'UniformOutput', false));
+                    'XTickLabel', arrayfun(@(x) sprintf('%g min', x), ticks, 'UniformOutput', false));
             end
 
             function changeScale(factor)
