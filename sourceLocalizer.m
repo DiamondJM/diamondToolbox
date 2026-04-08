@@ -1828,6 +1828,7 @@ classdef sourceLocalizer < handle
             dragSource   = '';    % 'mini' or 'main'
             dragStartX   = 0;
             dragStartWin = 0;
+            hDateLabels  = gobjects(0);   % text objects for date row (datetime mode)
 
             setWindow(0);   % initialise XLim + XTick
 
@@ -1841,15 +1842,29 @@ classdef sourceLocalizer < handle
                 % Ticks every 5 minutes
                 tickStep = 5;   % minutes
                 ticks    = (ceil(tStart / tickStep) * tickStep) : tickStep : (tStart + winSec);
+                % Remove stale date label text objects
+                delete(hDateLabels(isvalid(hDateLabels)));
+                hDateLabels = gobjects(0);
                 if ~isempty(startDatetime)
                     tickDt = startDatetime + minutes(ticks);
-                    tickLabels_x = arrayfun(@(dt) sprintf('%s\n%s', ...
-                        datestr(dt, 'mm/dd/yy'), datestr(dt, 'HH:MM')), ...
-                        tickDt, 'UniformOutput', false);
+                    % Time on the tick label row, date on a text row above
+                    set(axMain, 'XTick', ticks, ...
+                        'XTickLabel', arrayfun(@(dt) datestr(dt,'HH:MM'), tickDt, 'UniformOutput', false));
+                    hDateLabels = gobjects(1, numel(ticks));
+                    for k = 1:numel(ticks)
+                        xNorm = (ticks(k) - tStart) / winSec;
+                        hDateLabels(k) = text(axMain, xNorm, -0.06, ...
+                            datestr(tickDt(k), 'mm/dd/yy'), ...
+                            'Units', 'normalized', ...
+                            'HorizontalAlignment', 'center', ...
+                            'VerticalAlignment', 'top', ...
+                            'FontSize', get(axMain,'FontSize'), ...
+                            'Clipping', 'off');
+                    end
                 else
-                    tickLabels_x = arrayfun(@(x) sprintf('%g min', x), ticks, 'UniformOutput', false);
+                    set(axMain, 'XTick', ticks, ...
+                        'XTickLabel', arrayfun(@(x) sprintf('%g min', x), ticks, 'UniformOutput', false));
                 end
-                set(axMain, 'XTick', ticks, 'XTickLabel', tickLabels_x);
             end
 
             function changeScale(factor)
