@@ -1765,12 +1765,14 @@ classdef sourceLocalizer < handle
                 'Color','w', 'Box','off', 'TickDir','out', 'FontSize',11);
             hold(axMain, 'on');
 
-            % Sequence shaded windows (drawn first so traces appear on top)
+            % Sequence shaded windows + boundary lines (drawn first so traces appear on top)
             for jj = 1:size(seqPatchTimes, 1)
                 t0 = seqPatchTimes(jj,1);  t1 = seqPatchTimes(jj,2);
                 hp = patch(axMain, [t0 t1 t1 t0], [-1e4 -1e4 1e4 1e4], ...
                     [1 0.55 0.1], 'FaceAlpha',0.15, 'EdgeColor','none', 'HitTest','off');
-                hp.YLimInclude = 'off';
+                try; hp.YLimInclude = 'off'; catch; end
+                xline(axMain, t0, 'Color',[1 0.45 0], 'LineWidth',1.2, 'HitTest','off');
+                xline(axMain, t1, 'Color',[1 0.45 0], 'LineWidth',1.2, 'HitTest','off', 'LineStyle','--');
             end
 
             hLines = plot(axMain, t_disp, ts_base * scale + offsets, ...
@@ -1836,11 +1838,11 @@ classdef sourceLocalizer < handle
                 yl2 = ylim(axMini);
                 hPatch.XData = [tStart tStart+winSec tStart+winSec tStart tStart];
                 hPatch.YData = [yl2(1) yl2(1) yl2(2) yl2(2) yl2(1)];
-                % Ticks every 100 ms
-                tickStep = 0.1 / 60;   % 100 ms in minutes
+                % Ticks every 5 minutes
+                tickStep = 5;   % minutes
                 ticks    = (ceil(tStart / tickStep) * tickStep) : tickStep : (tStart + winSec);
                 set(axMain, 'XTick', ticks, ...
-                    'XTickLabel', arrayfun(@(x) sprintf('%.3gs', x*60), ticks, 'UniformOutput', false));
+                    'XTickLabel', arrayfun(@(x) sprintf('%g min', x), ticks, 'UniformOutput', false));
             end
 
             function changeScale(factor)
