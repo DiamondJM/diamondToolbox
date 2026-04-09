@@ -270,16 +270,18 @@ classdef sourceLocalizer < handle
             p = inputParser;
             addParameter(p,'plotting',true);
             addParameter(p,'forceNew',false);
+            addParameter(p,'timeWindow',0); % Seconds
             parse(p,varargin{:})
             plotting = p.Results.plotting;
             forceNew = p.Results.forceNew;
+            timeWindow = p.Results.timeWindow;
 
             self.prepareDeltaPosition('forceNew',forceNew); % Differential handling for spikes and seizures
 
             %% Onto localization
 
             self.localizationFunction('forceNew',forceNew); % Spikes or seizure agnostic call
-            self.locDataToRoi;
+            self.locDataToRoi('forceNew', forceNew, 'timeWindow', timeWindow);
 
             %% Plot
 
@@ -1565,16 +1567,17 @@ classdef sourceLocalizer < handle
             maxRoic = roicTable(1,1);
         end
 
-        function plotSurfFun(self)
+        function plotSurfFun(self, varargin)
 
-            % p = inputParser;
-            % addParameter(p,'timeWindow',0);
-            % parse(p,varargin{:})
+            p = inputParser;
+            addParameter(p, 'currentAz', -90);
+            addParameter(p, 'currentEl', -90);
+            parse(p,varargin{:})
             % timeWindow = p.Results.timeWindow;
 
             %% Preamble
 
-            currentEl = -90;
+            currentEl = p.Results.currentEl;
 
             %%%%
             % For seizure source info
@@ -1598,6 +1601,11 @@ classdef sourceLocalizer < handle
             if useLeft; view(-90,currentEl);
             else; view(90,currentEl);
             end
+
+            if ~isempty(p.Results.currentAz) || ~isempty(p.Results.currentEl)
+                view(p.Results.currentAz, currentEl);
+            end
+
             myBp.camlights(5);
             ax = gca;
 
