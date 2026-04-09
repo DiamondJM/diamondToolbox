@@ -1595,6 +1595,7 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function result = pointToSurface(self, imagePath)
+
             % Click one or more points on any NIfTI image and return the
             % nearest cortical surface vertex for each.
             %

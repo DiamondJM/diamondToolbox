@@ -401,7 +401,7 @@ classdef sourceLocalizer < handle
 
             ctsThresh = 0;
             zThreshPeak = 0.25; 
-            minNegPeakWidth = 2 * 60 * self.Fs; % 1 minute, in samples
+            minNegPeakWidth = 1 * 60 * self.Fs; % 2 minute, in samples
 
             % If you choose to mess around with ctsThresh or other
             % 'non-reported' parameters, feel free to pass them back with
@@ -534,6 +534,11 @@ classdef sourceLocalizer < handle
             self.spikeDetectionResults.rasters = fullRaster;
             self.spikeDetectionResults.Fs = self.Fs; % Downsampled
             self.spikeDetectionResults.waveforms = waveformsMaster;
+
+            self.spikeDetectionResults.paramStruct.ctsThresh = ctsThresh; 
+            self.spikeDetectionResults.paramStruct.zThreshPeak = zThreshPeak;
+            self.spikeDetectionResults.paramStruct.minNegPeakWidth = minNegPeakWidth; % 2 minute, in samples
+
 
         end
 
