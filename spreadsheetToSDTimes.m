@@ -1,8 +1,8 @@
-function sdAnnotations = readSdAnnotations(subj, rootFolder, varargin)
-% readSdAnnotations  Parse SD annotation CSV for a subject.
+function sdAnnotations = spreadsheetToSDTimes(rootFolder, subj, varargin)
+% spreadsheetToSDTimes  Parse SD annotation CSV for a subject.
 %
-%   sdAnnotations = readSdAnnotations(subj, rootFolder)
-%   sdAnnotations = readSdAnnotations(subj, rootFolder, 'chanNames', cNames)
+%   sdAnnotations = spreadsheetToSDTimes(rootFolder, subj)
+%   sdAnnotations = spreadsheetToSDTimes(rootFolder, subj, 'chanNames', cNames)
 %
 %   Returns a struct array. Each element is one SD group (one 'SD' row):
 %     .groupTime   datetime     onset of the SD group
@@ -12,17 +12,17 @@ function sdAnnotations = readSdAnnotations(subj, rootFolder, varargin)
 %                    .time   datetime  annotated onset for this electrode
 
 ip = inputParser;
-ip.addRequired('subj',       @ischar);
 ip.addRequired('rootFolder', @ischar);
+ip.addRequired('subj',       @ischar);
 ip.addParameter('chanNames', {}, @(x) iscell(x) || isstring(x));
-ip.parse(subj, rootFolder, varargin{:});
+ip.parse(rootFolder, subj, varargin{:});
 chanNames = cellstr(ip.Results.chanNames);
 if isequal(chanNames, {''})
     chanNames = {};
 end
 
 csvPath = fullfile(rootFolder, subj, 'ts', 'Annotations_SD.csv');
-assert(isfile(csvPath), '[readSdAnnotations] File not found: %s', csvPath);
+assert(isfile(csvPath), '[spreadsheetToSDTimes] File not found: %s', csvPath);
 
 fid = fopen(csvPath, 'r');
 C   = textscan(fid, '%q%q%*[^\n]', 'Delimiter', ',', 'HeaderLines', 10);
