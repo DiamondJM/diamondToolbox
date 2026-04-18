@@ -1,22 +1,35 @@
-function populateSeqFromAnnotations(sl, s)
+function populateSeqFromAnnotations(sl, s, varargin)
 % populateSeqFromAnnotations  Fill sl.seqResults from spreadsheetToSDTimes output.
 %
 %   populateSeqFromAnnotations(sl, s)
+%   populateSeqFromAnnotations(sl, s, 'subsensorLength', N)
 %
 %   sl  — sourceLocalizer object
 %   s   — struct array from spreadsheetToSDTimes
 %
 %   Populates sl.seqResults.seriesAll, timesAll, and startEndTime.
-%   Skips SD groups with no electrode sub-entries.
+%   Only retains SD groups whose electrode count equals subsensorLength.
 %
 %   timesAll format (matches computeSequences convention):
 %     row 1     : absolute sample of first electrode detection from clip onset
 %     rows 2..N : sample offsets from row 1 (cumsum reconstructs absolute positions)
 
+% Resolve default subsensorLength from paramStruct, fallback to 3
+defaultLen = 3;
+try
+    defaultLen = sl.sourceLocalizationResults.paramStruct.subsensorLength;
+catch
+end
+
+ip = inputParser;
+ip.addParameter('subsensorLength', defaultLen, @isnumeric);
+ip.parse(varargin{:});
+subsensorLength = ip.Results.subsensorLength;
+
 Fs = sl.Fs;
 
-% Filter to groups that have at least one electrode
-hasElec = arrayfun(@(g) ~isempty(g.electrodes), s);
+% Filter to groups with exactly subsensorLength electrodes
+hasElec = arrayfun(@(g) numel(g.electrodes) == subsensorLength, s);
 s = s(hasElec);
 nSeq = numel(s);
 
