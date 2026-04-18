@@ -23,8 +23,11 @@ if isequal(chanNames, {''})
     chanNames = {};
 end
 
-csvPath = fullfile(rootFolder, subj, 'ts', 'Annotations_SD.csv');
-assert(isfile(csvPath), '[spreadsheetToSDTimes] File not found: %s', csvPath);
+tsFolder = fullfile(rootFolder, subj, 'ts');
+hits = dir(fullfile(tsFolder, '*.csv'));
+hits = hits(~cellfun(@isempty, regexpi({hits.name}, 'annotations', 'once')));
+assert(~isempty(hits), '[spreadsheetToSDTimes] No annotations CSV found in %s', tsFolder);
+csvPath = fullfile(tsFolder, hits(1).name);
 
 fid = fopen(csvPath, 'r');
 C   = textscan(fid, '%q%q%f%*[^\n]', 'Delimiter', ',', 'HeaderLines', 10);
