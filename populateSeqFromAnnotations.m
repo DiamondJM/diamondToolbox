@@ -29,12 +29,13 @@ subsensorLength = ip.Results.subsensorLength;
 Fs = sl.Fs;
 
 % Filter to groups with exactly subsensorLength electrodes
-hasElec = arrayfun(@(g) numel(g.electrodes) == subsensorLength, s);
+hasElec = arrayfun(@(g) numel(g.electrodes) >= subsensorLength, s);
 s = s(hasElec);
 nSeq = numel(s);
 
 if nSeq == 0
     warning('[populateSeqFromAnnotations] No SD groups with electrode entries found.');
+    sl.seqResults = struct('seriesAll',[],'timesAll',[],'startEndTime',[]);
     return
 end
 
