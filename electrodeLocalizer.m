@@ -1728,10 +1728,10 @@ classdef electrodeLocalizer < handle
                     v = pointIn(1);
                     sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
                     if v < 0
-                        g = gifti(fullfile(sumaDir, 'lh.pial.gii'));
+                        g = gifti(fullfile(sumaDir, 'std.141.lh.pial.gii'));
                         xyz = g.vertices(abs(v), :);
                     else
-                        g = gifti(fullfile(sumaDir, 'rh.pial.gii'));
+                        g = gifti(fullfile(sumaDir, 'std.141.rh.pial.gii'));
                         xyz = g.vertices(v, :);
                     end
                 end
