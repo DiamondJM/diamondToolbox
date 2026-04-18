@@ -34,7 +34,7 @@ fid = fopen(csvPath, 'r');
 headerLines = 0;
 while ~feof(fid)
     line = fgetl(fid);
-    if ischar(line) && ~isempty(regexp(line, '^\d+/\d+/\d{4} \d+:\d+', 'once'))
+    if ischar(line) && ~isempty(regexp(line, '^\d+/\d+/\d{2,4} \d+:\d+', 'once'))
         break
     end
     headerLines = headerLines + 1;
@@ -48,12 +48,15 @@ dtStrs   = C{1};
 names    = C{2};
 durations = C{3};
 
-dtFmt = 'M/d/yyyy H:mm';
 dts   = NaT(numel(dtStrs), 1);
 for ii = 1:numel(dtStrs)
     try
-        dts(ii) = datetime(dtStrs{ii}, 'InputFormat', dtFmt);
+        dts(ii) = datetime(dtStrs{ii}, 'InputFormat', 'M/d/yyyy H:mm');
     catch
+        try
+            dts(ii) = datetime(dtStrs{ii}, 'InputFormat', 'M/d/yy H:mm');
+        catch
+        end
     end
 end
 
