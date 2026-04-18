@@ -85,7 +85,7 @@ for ii = 1:numel(names)
             'durationOverall',    seconds(durations(ii)), ...
             'electrodes',    struct('name',{},'time',{},'clipTime',{}));
     elseif ~isempty(currentGroup) && ~isnat(dts(ii))
-        tok = regexp(n, '^SD(\d+)$', 'tokens', 'once');
+        tok = regexp(n, '^(?:SD|DC)(\d+)$', 'tokens', 'once');
         if ~isempty(tok)
             elecNum  = str2double(tok{1});
             elecName = resolveElecName(n, elecNum, chanNames);
