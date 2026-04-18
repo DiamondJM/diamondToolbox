@@ -1,4 +1,4 @@
-function sdAnnotations = spreadsheetToSDTimes(rootFolder, subj, varargin)
+function [sdAnnotations, clipStart] = spreadsheetToSDTimes(rootFolder, subj, varargin)
 % spreadsheetToSDTimes  Parse SD annotation CSV for a subject.
 %
 %   sdAnnotations = spreadsheetToSDTimes(rootFolder, subj)
