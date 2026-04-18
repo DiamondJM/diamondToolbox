@@ -5,11 +5,13 @@ function sdAnnotations = spreadsheetToSDTimes(rootFolder, subj, varargin)
 %   sdAnnotations = spreadsheetToSDTimes(rootFolder, subj, 'chanNames', cNames)
 %
 %   Returns a struct array. Each element is one SD group (one 'SD' row):
-%     .groupTime   datetime     onset of the SD group
-%     .electrodes  struct array with fields:
-%                    .name   char      electrode label (from chanNames if given,
-%                                      otherwise the raw CSV label e.g. 'SD6')
-%                    .time   datetime  annotated onset for this electrode
+%     .groupTime     datetime   absolute clock time of the SD group marker
+%     .groupClipTime duration   time from clip start to group marker
+%     .duration_s    double     SD group duration in seconds (column C)
+%     .electrodes    struct array with fields:
+%                      .name      char      electrode label
+%                      .time      datetime  absolute clock time
+%                      .clipTime  duration  time from clip start to detection
 
 ip = inputParser;
 ip.addRequired('rootFolder', @ischar);
@@ -25,10 +27,11 @@ csvPath = fullfile(rootFolder, subj, 'ts', 'Annotations_SD.csv');
 assert(isfile(csvPath), '[spreadsheetToSDTimes] File not found: %s', csvPath);
 
 fid = fopen(csvPath, 'r');
-C   = textscan(fid, '%q%q%*[^\n]', 'Delimiter', ',', 'HeaderLines', 10);
+C   = textscan(fid, '%q%q%f%*[^\n]', 'Delimiter', ',', 'HeaderLines', 10);
 fclose(fid);
-dtStrs = C{1};
-names  = C{2};
+dtStrs   = C{1};
+names    = C{2};
+durations = C{3};
 
 dtFmt = 'M/d/yyyy H:mm';
 dts   = NaT(numel(dtStrs), 1);
@@ -39,7 +42,17 @@ for ii = 1:numel(dtStrs)
     end
 end
 
-sdAnnotations = struct('groupTime', cell(0,1), 'electrodes', cell(0,1));
+% Find clip start from first 'Start Recording' annotation
+clipStart = NaT;
+for ii = 1:numel(names)
+    if strcmp(strtrim(names{ii}), 'Start Recording')
+        clipStart = dts(ii);
+        break
+    end
+end
+assert(~isnat(clipStart), '[spreadsheetToSDTimes] No "Start Recording" row found in %s', csvPath);
+
+sdAnnotations = struct('groupTime',{}, 'groupClipTime',{}, 'duration_s',{}, 'electrodes',{});
 currentGroup  = [];
 
 for ii = 1:numel(names)
@@ -48,14 +61,20 @@ for ii = 1:numel(names)
         if ~isempty(currentGroup)
             sdAnnotations(end+1, 1) = currentGroup; %#ok<AGROW>
         end
-        currentGroup = struct('groupTime', dts(ii), ...
-            'electrodes', struct('name', {}, 'time', {}));
+        currentGroup = struct( ...
+            'groupTime',     dts(ii), ...
+            'groupClipTime', dts(ii) - clipStart, ...
+            'duration_s',    durations(ii), ...
+            'electrodes',    struct('name',{},'time',{},'clipTime',{}));
     elseif ~isempty(currentGroup) && ~isnat(dts(ii))
         tok = regexp(n, '^SD(\d+)$', 'tokens', 'once');
         if ~isempty(tok)
             elecNum  = str2double(tok{1});
             elecName = resolveElecName(n, elecNum, chanNames);
-            currentGroup.electrodes(end+1) = struct('name', elecName, 'time', dts(ii));
+            currentGroup.electrodes(end+1) = struct( ...
+                'name',     elecName, ...
+                'time',     dts(ii), ...
+                'clipTime', dts(ii) - clipStart);
         end
     end
 end
