@@ -72,7 +72,7 @@ for jj = 1:nSeq
     % startEndTime: group onset and onset+duration in samples
     groupSamp = round(seconds(s(jj).groupClipTime) * Fs);
     startEndTime(1, jj) = groupSamp;
-    startEndTime(2, jj) = groupSamp + round(s(jj).durationSec * Fs);
+    startEndTime(2, jj) = groupSamp + round(seconds(s(jj).durationOverall) * Fs);
 end
 
 sl.seqResults.seriesAll   = seriesAll;
