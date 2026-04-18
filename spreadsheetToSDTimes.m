@@ -7,7 +7,7 @@ function sdAnnotations = spreadsheetToSDTimes(rootFolder, subj, varargin)
 %   Returns a struct array. Each element is one SD group (one 'SD' row):
 %     .groupTime     datetime   absolute clock time of the SD group marker
 %     .groupClipTime duration   time from clip start to group marker
-%     .durationSec    double     SD group duration in seconds (column C)
+%     .durationOverall    double     SD group duration in seconds (column C)
 %     .electrodes    struct array with fields:
 %                      .name      char      electrode label
 %                      .time      datetime  absolute clock time
@@ -52,7 +52,7 @@ for ii = 1:numel(names)
 end
 assert(~isnat(clipStart), '[spreadsheetToSDTimes] No "Start Recording" row found in %s', csvPath);
 
-sdAnnotations = struct('groupTime',{}, 'groupClipTime',{}, 'durationSec',{}, 'electrodes',{});
+sdAnnotations = struct('groupTime',{}, 'groupClipTime',{}, 'durationOverall',{}, 'electrodes',{});
 currentGroup  = [];
 
 for ii = 1:numel(names)
@@ -64,7 +64,7 @@ for ii = 1:numel(names)
         currentGroup = struct( ...
             'groupTime',     dts(ii), ...
             'groupClipTime', dts(ii) - clipStart, ...
-            'durationSec',    durations(ii), ...
+            'durationOverall',    seconds(durations(ii)), ...
             'electrodes',    struct('name',{},'time',{},'clipTime',{}));
     elseif ~isempty(currentGroup) && ~isnat(dts(ii))
         tok = regexp(n, '^SD(\d+)$', 'tokens', 'once');
