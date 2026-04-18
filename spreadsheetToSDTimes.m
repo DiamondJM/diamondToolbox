@@ -29,8 +29,20 @@ hits = hits(~cellfun(@isempty, regexpi({hits.name}, 'annotations', 'once')));
 assert(~isempty(hits), '[spreadsheetToSDTimes] No annotations CSV found in %s', tsFolder);
 csvPath = fullfile(tsFolder, hits(1).name);
 
+% Dynamically find where data rows start (first line beginning with a datetime)
 fid = fopen(csvPath, 'r');
-C   = textscan(fid, '%q%q%f%*[^\n]', 'Delimiter', ',', 'HeaderLines', 10);
+headerLines = 0;
+while ~feof(fid)
+    line = fgetl(fid);
+    if ischar(line) && ~isempty(regexp(line, '^\d+/\d+/\d{4} \d+:\d+', 'once'))
+        break
+    end
+    headerLines = headerLines + 1;
+end
+fclose(fid);
+
+fid = fopen(csvPath, 'r');
+C   = textscan(fid, '%q%q%f%*[^\n]', 'Delimiter', ',', 'HeaderLines', headerLines);
 fclose(fid);
 dtStrs   = C{1};
 names    = C{2};
