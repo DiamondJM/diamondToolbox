@@ -291,11 +291,13 @@ classdef sourceLocalizer < handle
             p = inputParser;
             addParameter(p,'plotting',true);
             addParameter(p,'forceNew',false);
+            addParameter(p,'detectionMode','auto');
             parse(p,varargin{:})
             plotting = p.Results.plotting;
             forceNew = p.Results.forceNew;
+            detectionMode = p.Results.detectionMode;
 
-            self.prepareDeltaPosition('forceNew',forceNew);
+            self.prepareDeltaPosition('forceNew',forceNew,'detectionMode',detectionMode);
 
             %% Onto localization
 
@@ -315,8 +317,10 @@ classdef sourceLocalizer < handle
 
             p = inputParser;
             addParameter(p,'forceNew',false);
+            addParameter(p,'detectionMode','auto'); 
             parse(p,varargin{:})
             forceNew = p.Results.forceNew;
+            detectionMode = p.Results.detectionMode; 
 
             if ~forceNew && ~isempty(self.deltaPosition); return; end
 
@@ -327,8 +331,18 @@ classdef sourceLocalizer < handle
                 'subsensorLength',3,...
                 'distanceThresh', 150); % mm
 
-            self.populateSpikes('forceNew',forceNew);
-            self.computeSequences('forceNew',forceNew);
+            switch detectionMode 
+                case 'auto'
+
+                    self.populateSpikes('forceNew',forceNew);
+                    self.computeSequences('forceNew',forceNew);
+
+                case 'annotations'
+
+                    s = spreadsheetToSDTimes(self.rootFolder,self.subj,'chanNames',self.chanNames);
+                    populateSeqFromAnnotations(self,s);
+            end
+
             self.getSensors; % Should be lightweight; always re-compute 
             self.spikeSequenceToDeltaPosition; %  Should be lightweight; always re-compute 
 
@@ -1257,6 +1271,10 @@ classdef sourceLocalizer < handle
             self.sourceLocalizationResults.paramStruct.meta.subj = self.subj; 
             % Others?
 
+            %% Clear cached
+
+            sl.sourceLocalizationResults.roiResults = []; 
+
         end
 
         %% Plotting or post-localization analysis 
@@ -2001,6 +2019,45 @@ classdef sourceLocalizer < handle
 
             self.timeSeries = ts;
             self.Fs = Fs;
+        end
+
+        function filterTs(self, cutoffHz, varargin)
+        % FILTERTS  Lowpass filter timeSeries in-place.
+        %
+        % Usage:
+        %   sl.filterTs(cutoffHz)
+        %   sl.filterTs(cutoffHz, 'order', 4)
+        %
+        % Parameters:
+        %   cutoffHz  - passband upper bound in Hz (required)
+        %   order     - Butterworth filter order   (default 4)
+
+            p = inputParser;
+            addRequired(p,  'cutoffHz', @isnumeric);
+            addParameter(p, 'order', 4, @isnumeric);
+            parse(p, cutoffHz, varargin{:});
+            order = p.Results.order;
+
+            assert(~isempty(self.timeSeries), '[filterTs] timeSeries is empty.');
+            assert(~isempty(self.Fs) && self.Fs > 0, '[filterTs] Fs not set.');
+            assert(cutoffHz < self.Fs/2, ...
+                '[filterTs] cutoffHz (%.4g) must be below Nyquist (%.4g Hz).', cutoffHz, self.Fs/2);
+
+            filt = designfilt('lowpassiir', ...
+                'FilterOrder',        order, ...
+                'HalfPowerFrequency', cutoffHz, ...
+                'SampleRate',         self.Fs);
+
+            ts = double(self.timeSeries);
+            for c = 1:size(ts, 2)
+                valid = ~isnan(ts(:, c));
+                if sum(valid) > order * 3
+                    ts(valid, c) = filtfilt(filt, ts(valid, c));
+                end
+            end
+
+            self.timeSeries = ts;
+            fprintf('[filterTs] Lowpass filtered at %.4g Hz (order %d).\n', cutoffHz, order);
         end
 
     end
