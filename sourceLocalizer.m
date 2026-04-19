@@ -1569,15 +1569,7 @@ classdef sourceLocalizer < handle
 
         function plotSurfFun(self, varargin)
 
-            p = inputParser;
-            addParameter(p, 'currentAz', -90);
-            addParameter(p, 'currentEl', -90);
-            parse(p,varargin{:})
-            % timeWindow = p.Results.timeWindow;
-
             %% Preamble
-
-            currentEl = p.Results.currentEl;
 
             %%%%
             % For seizure source info
@@ -1587,6 +1579,13 @@ classdef sourceLocalizer < handle
 
             isLeftInds = self.geodesic.isLeftInds;
             useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
+
+            p = inputParser;
+            addParameter(p, 'currentAz', -90 * useLeft + 90 * ~useLeft);
+            addParameter(p, 'currentEl', -90);
+            parse(p,varargin{:})
+            currentEl = p.Results.currentEl;
+            currentAz = p.Results.currentAz;
 
             %% Brain plot
 
@@ -1598,13 +1597,7 @@ classdef sourceLocalizer < handle
             figure
             myBd.ezplot(myBp,gca); % If we would not like to include the resection territory
             % plotResectionSurf(myStruct) % If we would like to include the resection territory
-            if useLeft; view(-90,currentEl);
-            else; view(90,currentEl);
-            end
-
-            if ~isempty(p.Results.currentAz) || ~isempty(p.Results.currentEl)
-                view(p.Results.currentAz, currentEl);
-            end
+            view(currentAz, currentEl);
 
             myBp.camlights(5);
             ax = gca;
