@@ -270,16 +270,18 @@ classdef sourceLocalizer < handle
             p = inputParser;
             addParameter(p,'plotting',true);
             addParameter(p,'forceNew',false);
+            addParameter(p,'timeWindow',0); % Seconds
             parse(p,varargin{:})
             plotting = p.Results.plotting;
             forceNew = p.Results.forceNew;
+            timeWindow = p.Results.timeWindow;
 
             self.prepareDeltaPosition('forceNew',forceNew); % Differential handling for spikes and seizures
 
             %% Onto localization
 
             self.localizationFunction('forceNew',forceNew); % Spikes or seizure agnostic call
-            self.locDataToRoi;
+            self.locDataToRoi('forceNew', forceNew, 'timeWindow', timeWindow);
 
             %% Plot
 
@@ -1565,16 +1567,9 @@ classdef sourceLocalizer < handle
             maxRoic = roicTable(1,1);
         end
 
-        function plotSurfFun(self)
-
-            % p = inputParser;
-            % addParameter(p,'timeWindow',0);
-            % parse(p,varargin{:})
-            % timeWindow = p.Results.timeWindow;
+        function plotSurfFun(self, varargin)
 
             %% Preamble
-
-            currentEl = -90;
 
             %%%%
             % For seizure source info
@@ -1584,6 +1579,13 @@ classdef sourceLocalizer < handle
 
             isLeftInds = self.geodesic.isLeftInds;
             useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
+
+            p = inputParser;
+            addParameter(p, 'currentAz', -90 * useLeft + 90 * ~useLeft);
+            addParameter(p, 'currentEl', -90);
+            parse(p,varargin{:})
+            currentEl = p.Results.currentEl;
+            currentAz = p.Results.currentAz;
 
             %% Brain plot
 
@@ -1595,9 +1597,8 @@ classdef sourceLocalizer < handle
             figure
             myBd.ezplot(myBp,gca); % If we would not like to include the resection territory
             % plotResectionSurf(myStruct) % If we would like to include the resection territory
-            if useLeft; view(-90,currentEl);
-            else; view(90,currentEl);
-            end
+            view(currentAz, currentEl);
+
             myBp.camlights(5);
             ax = gca;
 
