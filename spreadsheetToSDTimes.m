@@ -29,17 +29,25 @@ hits = hits(~cellfun(@isempty, regexpi({hits.name}, 'annotations', 'once')));
 assert(~isempty(hits), '[spreadsheetToSDTimes] No annotations CSV found in %s', tsFolder);
 csvPath = fullfile(tsFolder, hits(1).name);
 
-% Dynamically find where data rows start (first line beginning with a datetime)
+% Scan header to find data start and 'Recording Start Time'
 fid = fopen(csvPath, 'r');
 headerLines = 0;
+clipStart   = NaT;
 while ~feof(fid)
     line = fgetl(fid);
-    if ischar(line) && ~isempty(regexp(line, '^\d+/\d+/\d{2,4} \d+:\d+', 'once'))
+    if ~ischar(line), break; end
+    if ~isempty(regexp(line, '^\d+/\d+/\d{2,4} \d+:\d+', 'once'))
         break
+    end
+    % Check for 'Recording Start Time' in column A, datetime in column B
+    parts = strsplit(line, ',');
+    if numel(parts) >= 2 && strcmpi(strtrim(parts{1}), 'Recording Start Time')
+        clipStart = parseDt(strtrim(parts{2}));
     end
     headerLines = headerLines + 1;
 end
 fclose(fid);
+assert(~isnat(clipStart), '[spreadsheetToSDTimes] No "Recording Start Time" found in %s', csvPath);
 
 fid = fopen(csvPath, 'r');
 C   = textscan(fid, '%q%q%f%*[^\n]', 'Delimiter', ',', 'HeaderLines', headerLines);
@@ -48,27 +56,10 @@ dtStrs   = C{1};
 names    = C{2};
 durations = C{3};
 
-dts   = NaT(numel(dtStrs), 1);
+dts = NaT(numel(dtStrs), 1);
 for ii = 1:numel(dtStrs)
-    try
-        dts(ii) = datetime(dtStrs{ii}, 'InputFormat', 'M/d/yyyy H:mm');
-    catch
-        try
-            dts(ii) = datetime(dtStrs{ii}, 'InputFormat', 'M/d/yy H:mm');
-        catch
-        end
-    end
+    dts(ii) = parseDt(dtStrs{ii});
 end
-
-% Find clip start from first 'Start Recording' annotation
-clipStart = NaT;
-for ii = 1:numel(names)
-    if strcmp(strtrim(names{ii}), 'Start Recording')
-        clipStart = dts(ii);
-        break
-    end
-end
-assert(~isnat(clipStart), '[spreadsheetToSDTimes] No "Start Recording" row found in %s', csvPath);
 
 sdAnnotations = struct('groupTime',{}, 'groupClipTime',{}, 'durationOverall',{}, 'electrodes',{});
 currentGroup  = [];
@@ -100,6 +91,13 @@ if ~isempty(currentGroup)
     sdAnnotations(end+1, 1) = currentGroup;
 end
 
+end
+
+% -------------------------------------------------------------------------
+function dt = parseDt(s)
+dt = NaT;
+try; dt = datetime(s, 'InputFormat', 'M/d/yyyy H:mm'); return; catch; end
+try; dt = datetime(s, 'InputFormat', 'M/d/yy H:mm');   return; catch; end
 end
 
 % -------------------------------------------------------------------------
