@@ -188,22 +188,31 @@ classdef electrodeLocalizer < handle
             % re-run), nothing left to do.
             if ~forceNew && self.isComplete(), return; end
 
-            self.checkPrerequisites('errorIfMissing', true);
-            self.getInputFiles();
+            leadsFile  = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+            leadsReady = ~forceNew && exist(leadsFile, 'file') == 2;
+
+            % Surface stages self-check; always attempt so SUMA gets run
+            % when FreeSurfer is done but AFNI hasn't been run yet.
             self.runSurface();           % never force — recon-all takes hours
             self.runSuma();              % never force — SUMA takes minutes
-            self.coregisterCT('forceNew', forceNew);
-            if isempty(self.chanNames)
-                self.chanNames = sourceLocalizer.loadChanNamesFromFile();
+
+            % CT pipeline and electrode naming only needed if leads.csv absent.
+            if ~leadsReady
+                self.checkPrerequisites('errorIfMissing', true);
+                self.getInputFiles();
+                self.coregisterCT('forceNew', forceNew);
+                if isempty(self.chanNames)
+                    self.chanNames = sourceLocalizer.loadChanNamesFromFile();
+                end
+                if useManual
+                    self.manualLocalize();
+                else
+                    self.detectElectrodes('forceNew', forceNew);
+                    self.namingGUI();
+                end
+                self.projectElectrodes();
+                self.writeLeads();
             end
-            if useManual
-                self.manualLocalize();
-            else
-                self.detectElectrodes('forceNew', forceNew);
-                self.namingGUI();
-            end
-            self.projectElectrodes();
-            self.writeLeads();
         end
 
         % -----------------------------------------------------------------
