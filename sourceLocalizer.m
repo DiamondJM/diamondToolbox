@@ -90,7 +90,7 @@ classdef sourceLocalizer < handle
             %% Electrode localization
 
             self.electrodeLocalizer = electrodeLocalizer( ...
-                subj, rootFolder, {}, 'forceNew', forceNewElectrodeLocalizer);
+                subj, rootFolder, 'forceNew', forceNewElectrodeLocalizer);
 
             % Propagate channel names resolved during electrode localization
             if ~isempty(self.electrodeLocalizer.chanNames)

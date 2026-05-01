@@ -84,20 +84,21 @@ classdef electrodeLocalizer < handle
         %% Constructor
         % -----------------------------------------------------------------
 
-        function self = electrodeLocalizer(subj, rootFolder, chanNames, varargin)
+        function self = electrodeLocalizer(subj, rootFolder, varargin)
             % electrodeLocalizer  Check completion and run pipeline if needed.
             %
             % Inputs:
             %   subj       - subject identifier string
             %   rootFolder - root data directory
-            %   chanNames  - cell array of channel names (may be empty)
             %
             % Optional name-value:
+            %   chanNames       - cell array of channel names (default {})
             %   forceNew        - re-run even if complete (default false)
             %   freesurfer_bin  - path to FreeSurfer bin directory
             %   afni_bin        - path to AFNI bin directory
 
             p = inputParser;
+            addParameter(p, 'chanNames',      {});
             addParameter(p, 'forceNew',       false);
             addParameter(p, 'freesurfer_bin', electrodeLocalizer.defaultFsBin());
             addParameter(p, 'afni_bin',       electrodeLocalizer.AFNI_BIN_DEFAULT);
@@ -108,7 +109,7 @@ classdef electrodeLocalizer < handle
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
-            self.chanNames  = chanNames;
+            self.chanNames  = p.Results.chanNames;
 
             self.setupDirectories();
 
