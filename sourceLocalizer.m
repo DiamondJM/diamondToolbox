@@ -76,21 +76,23 @@ classdef sourceLocalizer < handle
             %   Then call sl.localizationManager().
 
             p = inputParser;
+            addParameter(p, 'chanNames',                  {});
             addParameter(p, 'forceNewElectrodeLocalizer', false);
             parse(p, varargin{:});
             forceNewElectrodeLocalizer = p.Results.forceNewElectrodeLocalizer;
+            chanNames                  = p.Results.chanNames;
 
             toolboxRoot = fileparts(mfilename('fullpath'));
             addpath(genpath(toolboxRoot));
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
-            self.chanNames  = {};
+            self.chanNames  = chanNames;
 
             %% Electrode localization
 
             self.electrodeLocalizer = electrodeLocalizer( ...
-                subj, rootFolder, 'forceNew', forceNewElectrodeLocalizer);
+                subj, rootFolder, 'chanNames', chanNames, 'forceNew', forceNewElectrodeLocalizer);
 
             % Propagate channel names resolved during electrode localization
             if ~isempty(self.electrodeLocalizer.chanNames)
