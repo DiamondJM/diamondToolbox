@@ -533,7 +533,12 @@ classdef electrodeLocalizer < handle
             setenv('FREESURFER',      fsHome);
             setenv('FREESURFER_HOME', fsHome);
 
-            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            mrNii   = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            mrNiiGz = [mrNii '.gz'];
+            if ~exist(mrNii, 'file') && exist(mrNiiGz, 'file')
+                fprintf('[Stage 3] Decompressing mr_pre.nii.gz → mr_pre.nii...\n');
+                gunzip(mrNiiGz, self.locDirs.mr_pre);
+            end
 
             rawPial   = fullfile(self.locDirs.fs_subj, 'surf', 'lh.pial');
             reconDone = exist(rawPial, 'file') == 2;
