@@ -343,8 +343,8 @@ classdef sourceLocalizer < handle
 
                 case 'annotations'
 
-                    s = spreadsheetToSDTimes(self.rootFolder,self.subj,'chanNames',self.chanNames);
-                    populateSeqFromAnnotations(self,s);
+                    [s, clipDetails] = spreadsheetToSDTimes(self.rootFolder,self.subj,'chanNames',self.chanNames);
+                    populateSeqFromAnnotations(self,s,clipDetails);
             end
 
             self.getSensors; % Should be lightweight; always re-compute 
@@ -419,7 +419,7 @@ classdef sourceLocalizer < handle
 
             ctsThresh = 0;
             zThreshPeak = 0.25; 
-            minNegPeakWidth = 1 * 60 * self.Fs; % 2 minute, in samples
+            minNegPeakWidth = 1 * 60 * self.Fs; % Start with minutes; convert to samples
 
             % If you choose to mess around with ctsThresh or other
             % 'non-reported' parameters, feel free to pass them back with

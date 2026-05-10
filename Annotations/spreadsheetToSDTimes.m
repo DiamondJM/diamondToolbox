@@ -1,4 +1,4 @@
-function [sdAnnotations, clipStart] = spreadsheetToSDTimes(rootFolder, subj, varargin)
+function [sdAnnotations, clipDetails] = spreadsheetToSDTimes(rootFolder, subj, varargin)
 % spreadsheetToSDTimes  Parse SD annotation CSV for a subject.
 %
 %   sdAnnotations = spreadsheetToSDTimes(rootFolder, subj)
@@ -29,25 +29,38 @@ hits = hits(~cellfun(@isempty, regexpi({hits.name}, 'annotations', 'once')));
 assert(~isempty(hits), '[spreadsheetToSDTimes] No annotations CSV found in %s', tsFolder);
 csvPath = fullfile(tsFolder, hits(1).name);
 
-% Scan header to find data start and 'Recording Start Time'
+% Scan header to find data start, 'Recording Start Time', 'Recording End Time'
 fid = fopen(csvPath, 'r');
 headerLines = 0;
 clipStart   = NaT;
+clipEnd     = NaT;
 while ~feof(fid)
     line = fgetl(fid);
     if ~ischar(line), break; end
     if ~isempty(regexp(line, '^\d+/\d+/\d{2,4} \d+:\d+', 'once'))
         break
     end
-    % Check for 'Recording Start Time' in column A, datetime in column B
+    % Check for header fields in column A, datetime in column B
     parts = strsplit(line, ',');
-    if numel(parts) >= 2 && strcmpi(strtrim(parts{1}), 'Recording Start Time')
-        clipStart = parseDt(strtrim(parts{2}));
+    if numel(parts) >= 2
+        key = strtrim(parts{1});
+        if strcmpi(key, 'Recording Start Time')
+            clipStart = parseDt(strtrim(parts{2}));
+        elseif strcmpi(key, 'Recording End Time')
+            clipEnd = parseDt(strtrim(parts{2}));
+        end
     end
     headerLines = headerLines + 1;
 end
 fclose(fid);
 assert(~isnat(clipStart), '[spreadsheetToSDTimes] No "Recording Start Time" found in %s', csvPath);
+assert(~isnat(clipEnd),   '[spreadsheetToSDTimes] No "Recording End Time" found in %s', csvPath);
+
+clipDetails = struct( ...
+    'clipStart',    clipStart, ...
+    'clipEnd',      clipEnd, ...
+    'clipDuration', clipEnd - clipStart, ...
+    'csvPath',      csvPath);
 
 fid = fopen(csvPath, 'r');
 C   = textscan(fid, '%q%q%f%*[^\n]', 'Delimiter', ',', 'HeaderLines', headerLines);
