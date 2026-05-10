@@ -1,4 +1,4 @@
-function [sens,falseDetections] = compareDetectionsToAnnotations(sl)
+function [sens,falseDetections,comparisonResults] = compareDetectionsToAnnotations(sl)
 
 timeWindow = 5; % Minutes
 timeWindow = timeWindow * 60 * sl.Fs; % Samples
@@ -7,14 +7,16 @@ timeWindow = timeWindow * 60 * sl.Fs; % Samples
 
 sl.populateSpikes('forceNew',true);
 
-[iiAuto,jjAuto] = find(sl.spikeDetectionResults.rasters); % In samples, from clip start...
+rasterDetected = sl.spikeDetectionResults.rasters; 
+[iiAuto,jjAuto] = find(rasterDetected); % In samples, from clip start...
 
 %% Pull annotations 
 
 [s, clipDetails] = spreadsheetToSDTimes(sl.rootFolder,sl.subj,'chanNames',sl.chanNames);
 populateSeqFromAnnotations(sl,s,clipDetails);
 
-[iiManual,jjManual] = find(sl.spikeDetectionResults.rasters); 
+rasterAnnotated = sl.spikeDetectionResults.rasters; 
+[iiManual,jjManual] = find(rasterAnnotated); 
 
 %% Compare
 
@@ -27,9 +29,15 @@ sens = sum(sens) / length(sens);
 falseDetections = ~any(timeMatch & leadMatch); 
 falseDetections = sum(falseDetections) / length(falseDetections); 
 
-h = dbstack; 
+h = dbstack;
 fprintf('[%s] Sensitivity is %.2f%%.\n',h.name,sens * 100)
 fprintf('[%s] Ostensibly, %.2f%% of the automatic detections are false.\n',h.name,falseDetections * 100)
 
+comparisonResults = struct( ...
+    'rasterDetected',  rasterDetected, ...
+    'rasterAnnotated', rasterAnnotated, ...
+    'timeWindow',      timeWindow);   % samples
+
+sl.plotTimeSeries('spikePlottingMode','fromRaster','comparisonResults',comparisonResults)
 
 end

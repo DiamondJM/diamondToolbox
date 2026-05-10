@@ -418,7 +418,7 @@ classdef sourceLocalizer < handle
             ampScale = self.spikeDetectionResults.paramStruct.ampScale; 
 
             ctsThresh = 0;
-            zThreshPeak = 0.25; 
+            zThreshPeak = .25;
             minNegPeakWidth = 1 * 60 * self.Fs; % Start with minutes; convert to samples
 
             % If you choose to mess around with ctsThresh or other
@@ -461,7 +461,7 @@ classdef sourceLocalizer < handle
 
                 xCurrent = thisTs(:,kk);
                 % [pHeight,pInd] = findpeaks(xCurrent,'MinPeakProminence',zThreshPeak); 
-                [~,pInd,~,pHeight] = findpeaks(xCurrent,'MinPeakProminence',zThreshPeak);
+                [~,pInd,~,pHeight] = findpeaks(xCurrent,'MinPeakHeight',zThreshPeak);
                 % Using prominence...
 
                 % isBad = pHeight > maxPeakHeight;
@@ -545,7 +545,7 @@ classdef sourceLocalizer < handle
 
             %% Volume conduction
 
-            fullRaster = self.removeVolCond_fromRaster(fullRaster);
+            fullRaster = self.removeArtifactSpikes(fullRaster);
 
             %% Pack up
 
@@ -1667,7 +1667,9 @@ classdef sourceLocalizer < handle
             %   sl.plotTimeSeries()
             %   sl.plotTimeSeries('winSec', 1800)     % 30-min window (default)
             %   sl.plotTimeSeries('stagger', 1)       % z-score unit spacing (default)
-            %   sl.plotTimeSeries('showSeq', false)   % disable sequence overlay (default on)
+            %   sl.plotTimeSeries('spikePlottingMode', 'fromSeq')    % default: patches + dots from seqResults
+            %   sl.plotTimeSeries('spikePlottingMode', 'fromRaster') % red dots from spikeDetectionResults.rasters
+            %   sl.plotTimeSeries('spikePlottingMode', 'none')       % no spike overlay
             %
             % Navigation:
             %   Drag the blue window on the mini overview to scroll
@@ -1676,20 +1678,24 @@ classdef sourceLocalizer < handle
             %   Up/Down arrow     — scale amplitude up/down (stagger unchanged)
             %   Scale +/− buttons — same as Up/Down arrow
             %
-            % Sequence overlay (when showSeq=true and seqResults is populated):
-            %   Shaded band for each detected sequence (startEndTime window)
-            %   Dots at the signal minimum for each participating channel
+            % Spike overlay modes (spikePlottingMode):
+            %   'fromSeq'    — shaded patches + red dots from self.seqResults
+            %   'fromRaster' — red dots only, from self.spikeDetectionResults.rasters
+            %   'none'       — no overlay
 
             ip = inputParser;
-            ip.addParameter('winSec',        30*60,  @isnumeric);
-            ip.addParameter('stagger',       1,      @isnumeric);
-            ip.addParameter('showSeq',       true);
-            ip.addParameter('startDatetime', [],     @(x) isempty(x) || isa(x,'datetime'));
+            ip.addParameter('winSec',            30*60,     @isnumeric);
+            ip.addParameter('stagger',           1,         @isnumeric);
+            ip.addParameter('spikePlottingMode', 'fromSeq', ...
+                @(x) ischar(x) && ismember(x, {'fromSeq','fromRaster','none'}));
+            ip.addParameter('startDatetime',     [],        @(x) isempty(x) || isa(x,'datetime'));
+            ip.addParameter('comparisonResults', [],        @(x) isempty(x) || isstruct(x));
             ip.parse(varargin{:});
-            winSec        = ip.Results.winSec;
-            stagger       = ip.Results.stagger;
-            showSeq       = ip.Results.showSeq;
-            startDatetime = ip.Results.startDatetime;
+            winSec            = ip.Results.winSec;
+            stagger           = ip.Results.stagger;
+            spikePlottingMode = ip.Results.spikePlottingMode;
+            startDatetime     = ip.Results.startDatetime;
+            comparisonResults = ip.Results.comparisonResults;
 
             assert(~isempty(self.timeSeries), '[plotTimeSeries] timeSeries is empty.');
             assert(~isempty(self.Fs),         '[plotTimeSeries] Fs is not set.');
@@ -1740,46 +1746,119 @@ classdef sourceLocalizer < handle
             [tickVals, tickIdx] = sort(offsets);
             tickLabels = cNames(tickIdx);
 
-            % ── Sequence overlay data ────────────────────────────────────────
+            % ── Spike overlay data ──────────────────────────────────────────
             % Pre-compute patch times and dot positions (scale-dependent y computed
             % at draw time and updated on changeScale).
             seqPatchTimes = zeros(0,2);   % [nSeq x 2] start/end in minutes
             dotTimes      = zeros(1,0);   % x positions (minutes)
             dotSigBase    = zeros(1,0);   % z-scored signal value at dot (no scale, no offset)
             dotOffsets    = zeros(1,0);   % channel stagger offset for each dot
+            dotColors     = zeros(0,3);   % per-dot RGB (empty => fall back to default red)
 
-            hasSeq = showSeq && isfield(self.seqResults,'startEndTime') && ...
-                     ~isempty(self.seqResults.startEndTime);
-            if hasSeq
-                SET   = self.seqResults.startEndTime;   % 2 x nSeq  (samples)
-                sAll  = self.seqResults.seriesAll;       % maxLen x nSeq
-                tAll  = self.seqResults.timesAll;        % maxLen x nSeq  (samples, first abs + diffs)
-                nSeq  = size(SET, 2);
+            switch spikePlottingMode
+                case 'fromSeq'
+                    hasSeq = isfield(self.seqResults,'startEndTime') && ...
+                             ~isempty(self.seqResults.startEndTime);
+                    if hasSeq
+                        SET   = self.seqResults.startEndTime;   % 2 x nSeq  (samples)
+                        sAll  = self.seqResults.seriesAll;       % maxLen x nSeq
+                        tAll  = self.seqResults.timesAll;        % maxLen x nSeq  (samples, first abs + diffs)
+                        nSeq  = size(SET, 2);
 
-                seqPatchTimes = SET' / self.Fs / 60;    % nSeq x 2, minutes
+                        seqPatchTimes = SET' / self.Fs / 60;    % nSeq x 2, minutes
 
-                for jj = 1:nSeq
-                    col = sAll(:, jj);
-                    col = col(~cellfun(@isempty, col));
-                    nContacts = numel(col);
-                    if nContacts == 0, continue; end
+                        for jj = 1:nSeq
+                            col = sAll(:, jj);
+                            col = col(~cellfun(@isempty, col));
+                            nContacts = numel(col);
+                            if nContacts == 0, continue; end
 
-                    % Reconstruct absolute sample times (first entry is absolute,
-                    % remaining are diffs)
-                    absSamples = cumsum(tAll(1:nContacts, jj));
+                            % Reconstruct absolute sample times (first entry is absolute,
+                            % remaining are diffs)
+                            absSamples = cumsum(tAll(1:nContacts, jj));
 
-                    for kk = 1:nContacts
-                        chanIdx = find(strcmp(cNames, col{kk}), 1);
-                        if isempty(chanIdx), continue; end
+                            for kk = 1:nContacts
+                                chanIdx = find(strcmp(cNames, col{kk}), 1);
+                                if isempty(chanIdx), continue; end
 
-                        tMin = absSamples(kk) / self.Fs / 60;
-                        [~, dispIdx] = min(abs(t_disp - tMin));
+                                tMin = absSamples(kk) / self.Fs / 60;
+                                [~, dispIdx] = min(abs(t_disp - tMin));
 
-                        dotTimes(end+1)   = t_disp(dispIdx);
-                        dotSigBase(end+1) = ts_base(dispIdx, chanIdx);
-                        dotOffsets(end+1) = offsets(chanIdx);
+                                dotTimes(end+1)   = t_disp(dispIdx);
+                                dotSigBase(end+1) = ts_base(dispIdx, chanIdx);
+                                dotOffsets(end+1) = offsets(chanIdx);
+                            end
+                        end
                     end
-                end
+
+                case 'fromRaster'
+                    if ~isempty(comparisonResults) && ...
+                            isfield(comparisonResults,'rasterDetected') && ...
+                            isfield(comparisonResults,'rasterAnnotated')
+                        rD = comparisonResults.rasterDetected;
+                        rA = comparisonResults.rasterAnnotated;
+                        if isfield(comparisonResults,'timeWindow') && ~isempty(comparisonResults.timeWindow)
+                            tW = comparisonResults.timeWindow;
+                        else
+                            tW = round(5 * 60 * self.Fs);   % default: 5 min
+                        end
+                        [iD, jD] = find(rD);  iD = iD(:);  jD = jD(:);
+                        [iA, jA] = find(rA);  iA = iA(:);  jA = jA(:);
+
+                        detMatched = false(numel(iD), 1);
+                        annMatched = false(numel(iA), 1);
+                        chans = unique([jD; jA]).';
+                        for ch = chans
+                            mD = jD == ch;  mA = jA == ch;
+                            iDch = iD(mD); iAch = iA(mA);
+                            if isempty(iDch) || isempty(iAch); continue; end
+                            diffs = abs(iDch - iAch.');     % nDch x nAch
+                            detMatched(mD) = any(diffs <= tW, 2);
+                            annMatched(mA) = any(diffs <= tW, 1).';
+                        end
+
+                        allI    = [iD; iA];
+                        allJ    = [jD; jA];
+                        matched = [detMatched; annMatched];
+                        isDet   = [true(numel(iD),1); false(numel(iA),1)];
+
+                        GREEN = [0    0.7  0   ];
+                        RED   = [0.85 0.2  0   ];
+                        BLUE  = [0.2  0.4  0.85];
+                        cMat  = zeros(numel(allI), 3);
+                        cMat(matched, :)             = repmat(GREEN, sum(matched), 1);
+                        cMat(~matched & isDet, :)    = repmat(RED,   sum(~matched & isDet),  1);
+                        cMat(~matched & ~isDet, :)   = repmat(BLUE,  sum(~matched & ~isDet), 1);
+
+                        if ~isempty(allI)
+                            dispIdxAll = max(1, min(round(allI / dispDec), numel(t_disp)));
+                            linIdx     = sub2ind(size(ts_base), dispIdxAll, allJ);
+                            dotTimes   = reshape(t_disp(dispIdxAll), 1, []);
+                            dotSigBase = reshape(ts_base(linIdx),    1, []);
+                            dotOffsets = reshape(offsets(allJ),      1, []);
+                            dotColors  = cMat;
+                        end
+                    else
+                        hasRaster = ~isempty(self.spikeDetectionResults) && ...
+                            isfield(self.spikeDetectionResults,'rasters') && ...
+                            ~isempty(self.spikeDetectionResults.rasters);
+                        if hasRaster
+                            R = self.spikeDetectionResults.rasters;
+                            [sampIdx, chanIdx] = find(R);
+                            if ~isempty(sampIdx)
+                                sampIdx = sampIdx(:);
+                                chanIdx = chanIdx(:);
+                                dispIdxAll = max(1, min(round(sampIdx / dispDec), numel(t_disp)));
+                                linIdx = sub2ind(size(ts_base), dispIdxAll, chanIdx);
+                                dotTimes   = reshape(t_disp(dispIdxAll), 1, []);
+                                dotSigBase = reshape(ts_base(linIdx),    1, []);
+                                dotOffsets = reshape(offsets(chanIdx),   1, []);
+                            end
+                        end
+                    end
+
+                case 'none'
+                    % no overlay
             end
 
             % ── Figure ──────────────────────────────────────────────────────
@@ -1812,8 +1891,24 @@ classdef sourceLocalizer < handle
             % Sequence dots
             hSeqDots = [];
             if ~isempty(dotTimes)
+                if ~isempty(dotColors)
+                    cArg = dotColors;        % per-dot RGB
+                else
+                    cArg = [0.85 0.2 0];     % default red
+                end
                 hSeqDots = scatter(axMain, dotTimes, dotSigBase * scale + dotOffsets, ...
-                    40, [0.85 0.2 0], 'filled', 'HitTest','off');
+                    40, cArg, 'filled', 'HitTest','off');
+            end
+
+            % Legend for comparison-mode coloring
+            if ~isempty(dotColors)
+                hG = scatter(axMain, NaN, NaN, 40, [0    0.7  0   ], 'filled', ...
+                    'DisplayName','Detected & Annotated');
+                hR = scatter(axMain, NaN, NaN, 40, [0.85 0.2  0   ], 'filled', ...
+                    'DisplayName','Detected only');
+                hB = scatter(axMain, NaN, NaN, 40, [0.2  0.4  0.85], 'filled', ...
+                    'DisplayName','Annotated only');
+                legend(axMain, [hG hR hB], 'Location','best', 'AutoUpdate','off');
             end
 
             set(axMain, 'YTick',tickVals, 'YTickLabel',tickLabels, 'XLim',[tValid(1), tValid(1)+winSec]);
@@ -2068,6 +2163,105 @@ classdef sourceLocalizer < handle
             fprintf('[filterTs] Lowpass filtered at %.4g Hz (order %d).\n', cutoffHz, order);
         end
 
+        function detrendTs(self, varargin)
+        % DETRENDTS  Remove slow trends from timeSeries in-place.
+        %
+        % Subtracts a per-channel moving average computed over a window
+        % long enough that SD-scale events (~1-10 min) are preserved while
+        % slower drift (>= ~15 min) is removed.
+        %
+        % Usage:
+        %   sl.detrendTs()
+        %   sl.detrendTs('windowMin', 15)
+        %
+        % Parameters:
+        %   windowMin - moving-average window in minutes (default 15)
+
+            p = inputParser;
+            addParameter(p, 'windowMin', 15, @(x) isnumeric(x) && x > 0);
+            parse(p, varargin{:});
+            windowMin = p.Results.windowMin;
+
+            assert(~isempty(self.timeSeries),         '[detrendTs] timeSeries is empty.');
+            assert(~isempty(self.Fs) && self.Fs > 0,  '[detrendTs] Fs not set.');
+
+            winSamps = max(1, round(windowMin * 60 * self.Fs));
+            ts = double(self.timeSeries);
+            ts = ts - smoothdata(ts, 1, 'movmean', winSamps, 'omitnan');
+            self.timeSeries = ts;
+
+            fprintf('[detrendTs] Subtracted %g-min moving average (%d samples).\n', ...
+                windowMin, winSamps);
+        end
+
+        function rasters = removeArtifactSpikes(self, rasters)
+        % Detect sharp narrow deflections (artifact-shaped) per channel,
+        % flag sample times where >=2 channels co-fire, and zero out any
+        % spikes in `rasters` within +/-100 ms of those flagged times.
+        %
+        % Subsumes the older removeVolCond_fromRaster: instead of treating
+        % every >=2-channel slow-spike sample as volume conduction, we
+        % build a dedicated narrow-spike raster from the raw time series
+        % and use its co-firings as the artifact mask.
+
+            assert(~isempty(self.timeSeries), ...
+                '[removeArtifactSpikes] timeSeries empty.');
+
+            Fs              = self.Fs;
+            ts              = self.timeSeries;       % already z-scored by populateSpikes
+            [nSamp, nChan]  = size(ts);
+            maxNarrowWidth  = max(1, round(30 * Fs));     % 30 s
+            zThreshNarrow   = 1;                        % sigma (post z-score)
+
+            % Cast a wide net: any narrow local minimum >= 1 sigma is
+            % a candidate. Two channels coinciding within 100 ms is
+            % overwhelmingly unlikely for real, independent SDs, so the
+            % co-firing filter (below) does the actual gatekeeping.
+            artifactRaster = sparse(nSamp, nChan);
+
+            warning('off','signal:findpeaks:largeMinPeakHeight');
+            for kk = 1:nChan
+                x = ts(:, kk);
+                [~, nIdx] = findpeaks(-x, ...
+                    'MinPeakHeight', zThreshNarrow, ...
+                    'MaxPeakWidth',  maxNarrowWidth);
+                if ~isempty(nIdx)
+                    artifactRaster(nIdx, kk) = true;
+                end
+            end
+
+            % Per-sample multiplicity of narrow peaks (summed across channels)
+            spikePerSample = full(sum(artifactRaster, 2));
+
+            % A narrow peak is "partnered" if there's at least one other
+            % narrow peak (any channel) within +/-100 ms. Box-conv counts all
+            % narrow peaks in the window (own contribution included), so
+            % >=2 means a partner exists.
+            winSamps    = round(0.1 * Fs);
+            boxWin      = ones(2*winSamps + 1, 1);
+            nearbyCount = conv(spikePerSample, boxWin, 'same');
+            hasPartner  = (spikePerSample > 0) & (nearbyCount >= 2);
+
+            if ~any(hasPartner)
+                fprintf('[removeArtifactSpikes] No partnered narrow peaks found.\n');
+                return
+            end
+
+            % Kill mask: union of +/-100 ms windows around every partnered
+            % narrow peak — i.e. any narrow peak inside a bad region
+            % propagates a +/-100 ms kill-zone to the regular raster.
+            isArtifact = conv(double(hasPartner), boxWin, 'same') > 0;
+
+            nBefore = nnz(rasters);
+            rasters(isArtifact, :) = 0;
+            nAfter  = nnz(rasters);
+
+            fprintf(['[removeArtifactSpikes] %d partnered narrow peaks; ' ...
+                'killed %d / %d spikes (%.1f%%) within bad +/-100 ms windows.\n'], ...
+                nnz(hasPartner), nBefore - nAfter, nBefore, ...
+                100 * (nBefore - nAfter) / max(nBefore, 1));
+        end
+
     end
 
     methods (Static = true)
@@ -2125,29 +2319,6 @@ classdef sourceLocalizer < handle
             % overallInds(removeIndices) = [];
 
             % warning('Remove duplicates done. Placing this warning so if we see it multiple times, we know this function is being called redundantly.');
-
-        end
-
-        function rasters = removeVolCond_fromRaster(rasters)
-
-            listLocs = cell(1,size(rasters,2));
-
-            if sum(rasters(:)) == 0; return; end
-
-            volCondInds = find(sum(rasters,2) >= 2);
-            if isempty(volCondInds); return; end
-            fprintf('%.2f%% of single spike samples contained duplicate spikes and were removed on account of possible volume conduction.\n',full(length(volCondInds) / sum(any(rasters,2)) * 100));
-            % markForDeletion = cell(1,size(rasters,2));
-
-            for ii = 1:length(listLocs)
-                listLocs{ii} = find(rasters(:,ii));
-            end
-
-            for ii = 1:length(listLocs)
-                isBad = ismember(listLocs{ii},volCondInds);
-                rasters(listLocs{ii}(isBad),ii) = false;
-                % waveforms{ii}(isBad,:) = [];
-            end
 
         end
 
