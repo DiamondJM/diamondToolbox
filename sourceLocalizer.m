@@ -412,6 +412,18 @@ classdef sourceLocalizer < handle
 
             % Kill the input parser
 
+            % Detect artifact windows on the (still raw / unfiltered) time
+            % series and zero them out in place. Filtering / detrending may
+            % follow this step and before peak detection — the zero pads
+            % survive filtering, so flagged samples remain effectively dead
+            % at peak-detection time without needing a second mask pass.
+            
+            self.filterTs(0.1); 
+            self.zeroArtifactWindows();
+
+            self.filterTs(0.01); 
+            self.detrendTs; 
+
             maxNegPeakWidth = self.spikeDetectionResults.paramStruct.maxNegPeakWidth * self.Fs; % Samples
             peakWin = self.spikeDetectionResults.paramStruct.peakWin * self.Fs; % Samples
             zThresh = self.spikeDetectionResults.paramStruct.zThresh; 
@@ -542,10 +554,6 @@ classdef sourceLocalizer < handle
             badCounts = sum(fullRaster) < ctsThresh;
             fullRaster(:,badCounts) = false;
 
-
-            %% Volume conduction
-
-            fullRaster = self.removeArtifactSpikes(fullRaster);
 
             %% Pack up
 
@@ -2194,24 +2202,37 @@ classdef sourceLocalizer < handle
                 windowMin, winSamps);
         end
 
-        function rasters = removeArtifactSpikes(self, rasters)
-        % Detect sharp narrow deflections (artifact-shaped) per channel,
-        % flag sample times where >=2 channels co-fire, and zero out any
-        % spikes in `rasters` within +/-100 ms of those flagged times.
+        function zeroArtifactWindows(self)
+        % ZEROARTIFACTWINDOWS  Detect artifact sample windows on raw
+        % timeSeries and replace them with linear interpolation in place.
         %
-        % Subsumes the older removeVolCond_fromRaster: instead of treating
-        % every >=2-channel slow-spike sample as volume conduction, we
-        % build a dedicated narrow-spike raster from the raw time series
-        % and use its co-firings as the artifact mask.
+        % Per-channel: find narrow local minima (sharp transient deflections);
+        % flag any narrow peak that has at least one other narrow peak (any
+        % channel) within +/-100 ms; mark the union of +/-killWinSec windows
+        % around every partnered narrow peak as "bad". Then linearly
+        % interpolate self.timeSeries across each contiguous bad run so the
+        % signal stays continuous through the downstream filter (zero-fill
+        % would create step discontinuities that ring).
+        %
+        % Stores the bad-sample mask in self.spikeDetectionResults.artifactMask
+        % (logical, length nSamp) for inspection — but no later application
+        % step is required: the interpolation flattens the artifact at the
+        % source, so detected spike samples landing in flagged windows are
+        % already squashed.
+        %
+        % Intended to run on RAW (unfiltered) timeSeries — call this BEFORE
+        % filtering/detrending so transient artifacts are detected in their
+        % native form (filtering would shift / smear the negative peaks and
+        % leak them out of any post-hoc mask).
 
             assert(~isempty(self.timeSeries), ...
-                '[removeArtifactSpikes] timeSeries empty.');
+                '[zeroArtifactWindows] timeSeries empty.');
 
             Fs              = self.Fs;
-            ts              = self.timeSeries;       % already z-scored by populateSpikes
+            ts              = self.timeSeries;
             [nSamp, nChan]  = size(ts);
-            maxNarrowWidth  = max(1, round(30 * Fs));     % 30 s
-            zThreshNarrow   = 1;                        % sigma (post z-score)
+            maxNarrowWidth  = max(1, round(30 * Fs));   % 30 s
+            zThreshNarrow   = 1;                        % sigma (per-channel)
 
             % Cast a wide net: any narrow local minimum >= 1 sigma is
             % a candidate. Two channels coinciding within 100 ms is
@@ -2221,8 +2242,11 @@ classdef sourceLocalizer < handle
 
             warning('off','signal:findpeaks:largeMinPeakHeight');
             for kk = 1:nChan
-                x = ts(:, kk);
-                [~, nIdx] = findpeaks(-x, ...
+                x  = ts(:, kk);
+                sd = std(x, 'omitnan');
+                if sd == 0 || ~isfinite(sd); continue; end
+                xZ = (x - mean(x, 'omitnan')) / sd;
+                [~, nIdx] = findpeaks(-xZ, ...
                     'MinPeakHeight', zThreshNarrow, ...
                     'MaxPeakWidth',  maxNarrowWidth);
                 if ~isempty(nIdx)
@@ -2237,29 +2261,62 @@ classdef sourceLocalizer < handle
             % narrow peak (any channel) within +/-100 ms. Box-conv counts all
             % narrow peaks in the window (own contribution included), so
             % >=2 means a partner exists.
-            winSamps    = round(0.1 * Fs);
-            boxWin      = ones(2*winSamps + 1, 1);
-            nearbyCount = conv(spikePerSample, boxWin, 'same');
-            hasPartner  = (spikePerSample > 0) & (nearbyCount >= 2);
+            partnerWinSamps = round(0.1 * Fs);
+            partnerBox      = ones(2 * partnerWinSamps + 1, 1);
+            nearbyCount     = conv(spikePerSample, partnerBox, 'same');
+            hasPartner      = (spikePerSample > 0) & (nearbyCount >= 2);
 
             if ~any(hasPartner)
-                fprintf('[removeArtifactSpikes] No partnered narrow peaks found.\n');
+                self.spikeDetectionResults.artifactMask = false(nSamp, 1);
+                fprintf('[zeroArtifactWindows] No partnered narrow peaks found; nothing zeroed.\n');
                 return
             end
 
-            % Kill mask: union of +/-100 ms windows around every partnered
-            % narrow peak — i.e. any narrow peak inside a bad region
-            % propagates a +/-100 ms kill-zone to the regular raster.
-            isArtifact = conv(double(hasPartner), boxWin, 'same') > 0;
+            % Mask: union of +/-killWinSec windows around every partnered
+            % narrow peak. Wider than the partner-detection window because
+            % the artifact's slow tails bleed past the sharp tip — a narrow
+            % notch leaves the surrounding wings intact and the filter
+            % later reconstitutes a near-identical artifact.
+            killWinSec   = 10;
+            killWinSamps = round(killWinSec * Fs);
+            killBox      = ones(2 * killWinSamps + 1, 1);
+            artifactMask = conv(double(hasPartner), killBox, 'same') > 0;
+            artifactMask = artifactMask(:);
+            self.spikeDetectionResults.artifactMask = artifactMask;
 
-            nBefore = nnz(rasters);
-            rasters(isArtifact, :) = 0;
-            nAfter  = nnz(rasters);
+            % Linearly interpolate across each contiguous bad region so the
+            % signal stays continuous (zero-fill creates step discontinuities
+            % that ring through the downstream filter).
+            d         = diff([false; artifactMask; false]);
+            runStarts = find(d ==  1);
+            runEnds   = find(d == -1) - 1;
+            ts        = self.timeSeries;
+            for ii = 1:numel(runStarts)
+                s = runStarts(ii);
+                e = runEnds(ii);
+                n = e - s + 1;
+                hasLeft  = s > 1;
+                hasRight = e < nSamp;
+                if hasLeft && hasRight
+                    vL = ts(s - 1, :);   vR = ts(e + 1, :);
+                    w  = (1:n).' / (n + 1);          % n x 1
+                    ts(s:e, :) = vL + w .* (vR - vL); % n x nChan
+                elseif hasLeft         % run runs to end of signal — hold last good value
+                    ts(s:e, :) = repmat(ts(s - 1, :), n, 1);
+                elseif hasRight        % run starts at first sample — hold first good value
+                    ts(s:e, :) = repmat(ts(e + 1, :), n, 1);
+                else                    % whole signal is bad — give up and zero
+                    ts(s:e, :) = 0;
+                end
+            end
+            self.timeSeries = ts;
 
-            fprintf(['[removeArtifactSpikes] %d partnered narrow peaks; ' ...
-                'killed %d / %d spikes (%.1f%%) within bad +/-100 ms windows.\n'], ...
-                nnz(hasPartner), nBefore - nAfter, nBefore, ...
-                100 * (nBefore - nAfter) / max(nBefore, 1));
+            fprintf(['[zeroArtifactWindows] %d partnered narrow peaks; ' ...
+                '%d samples (%.2f%% of recording) interpolated across ' ...
+                '%d bad runs (+/-%g s kill window).\n'], ...
+                nnz(hasPartner), nnz(artifactMask), ...
+                100 * nnz(artifactMask) / nSamp, ...
+                numel(runStarts), killWinSec);
         end
 
     end

@@ -1,4 +1,6 @@
-function [sens,falseDetections,comparisonResults] = compareDetectionsToAnnotations(sl)
+function comparisonResults = compareDetectionsToAnnotations(subj,rootFolder)
+
+load(fullfile(rootFolder,subj,'sl.mat'),'sl')
 
 timeWindow = 5; % Minutes
 timeWindow = timeWindow * 60 * sl.Fs; % Samples
@@ -36,7 +38,9 @@ fprintf('[%s] Ostensibly, %.2f%% of the automatic detections are false.\n',h.nam
 comparisonResults = struct( ...
     'rasterDetected',  rasterDetected, ...
     'rasterAnnotated', rasterAnnotated, ...
-    'timeWindow',      timeWindow);   % samples
+    'timeWindow',      timeWindow,...
+    'sens',sens,...
+    'falseDetections',falseDetections);   % samples
 
 sl.plotTimeSeries('spikePlottingMode','fromRaster','comparisonResults',comparisonResults)
 
