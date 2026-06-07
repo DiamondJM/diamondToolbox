@@ -1785,8 +1785,14 @@ classdef electrodeLocalizer < handle
 
             [vol, info] = electrodeLocalizer.loadVolume(imagePath);
 
+            % DWI volumes need a much wider window to render anything useful.
+            extraArgs = {};
+            if contains(imagePath, 'dwi', 'IgnoreCase', true)
+                extraArgs = {'initW', 1500};
+            end
+
             electrodeLocalizer.slicerGUI(vol, info, self.subj, initMarker, {}, ...
-                'readonly', true, 'initXYZ', xyz);
+                'readonly', true, 'initXYZ', xyz, extraArgs{:});
         end
 
         % -----------------------------------------------------------------
@@ -3032,9 +3038,13 @@ classdef electrodeLocalizer < handle
             ip2 = inputParser;
             ip2.addParameter('readonly', false);
             ip2.addParameter('initXYZ',  []);
+            ip2.addParameter('initW',    []);
+            ip2.addParameter('initL',    []);
             ip2.parse(varargin{:});
             readonly = ip2.Results.readonly;
             initXYZ  = ip2.Results.initXYZ;
+            initW    = ip2.Results.initW;
+            initL    = ip2.Results.initL;
 
             % Derive volume metadata
             Txfm     = info.Transform.T;
@@ -3050,6 +3060,8 @@ classdef electrodeLocalizer < handle
                 curVox = max(1, min([nx,ny,nz], round(vox_h(1:3))));
             end
             wW = 3000;  wL = 700;
+            if ~isempty(initW), wW = initW; end
+            if ~isempty(initL), wL = initL; end
             mode = 'scroll';
             dragStart    = [];
             dragStartFig = [];
@@ -3236,7 +3248,9 @@ classdef electrodeLocalizer < handle
             end
 
             refreshAll();
-            waitfor(fig);
+            if ~readonly
+                waitfor(fig);
+            end
 
             % ---- Helpers ----
             function setMode(m)

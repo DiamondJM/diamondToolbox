@@ -313,7 +313,19 @@ classdef sourceLocalizer < handle
             if ~plotting; return; end
             self.plotSurfFun;
 
-            % self.plotDimensionsReducedWrapper; 
+            figDir = fullfile(self.subjFolder,'Figures'); 
+            if ~isfolder(figDir); mkdir(figDir); end
+            saveas(gcf,fullfile(self.subjFolder,'Figures',sprintf('%s_heatmapPlot.png',self.subj)));
+
+            pathToDWI = fullfile(self.subjFolder,'MRI','DWI');
+
+            d = dir(fullfile(pathToDWI, '*.gz'));
+            assert(isscalar(d), '[DWI] Expected 1 .gz file in %s, found %d.', pathToDWI, numel(d));
+            pathToDWI = fullfile(d.folder, d.name);
+
+            self.electrodeLocalizer.showPoint(self.findTopRoic,pathToDWI);
+            print(gcf, fullfile(self.subjFolder, 'Figures', ...
+                sprintf('%s_dwiPlot.png', self.subj)), '-dpng', '-r150', '-noui');            % self.plotDimensionsReducedWrapper;
 
         end
 
@@ -1445,12 +1457,13 @@ classdef sourceLocalizer < handle
 
             [myBd, myBp] = self.retrieveBraindata;
 
+            self.loadGeodesic;
             isLeftInds = self.geodesic.isLeftInds;
             useLeft = logical(round(sum(isLeftInds) / length(isLeftInds)));
 
             p = inputParser;
             addParameter(p, 'currentAz', -90 * useLeft + 90 * ~useLeft);
-            addParameter(p, 'currentEl', -90);
+            addParameter(p, 'currentEl', 90);
             parse(p,varargin{:})
             currentEl = p.Results.currentEl;
             currentAz = p.Results.currentAz;
@@ -1467,6 +1480,7 @@ classdef sourceLocalizer < handle
             myBd.ezplot(myBp,gca); % If we would not like to include the resection territory
             % plotResectionSurf(myStruct) % If we would like to include the resection territory
             view(currentAz, currentEl);
+            myBp.plotPoint(self.electrodeLocalizer.leads, 'radius', 1.5);
 
             myBp.camlights(5);
             ax = gca;
