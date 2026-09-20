@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below, and the associated publications."
+title: diamondToolbox
+type: software
+license: MIT
+repository-code: "https://github.com/DiamondJM/diamondToolbox"
+abstract: "diamondToolbox provides two MATLAB classes covering the full pipeline from raw imaging data to cortical source localization of epileptiform activity: electrodeLocalizer (electrode localization from imaging) and sourceLocalizer (source localization of ictal/interictal discharges from intracranial EEG using travelling-wave multilateration)."
+authors: [{family-names: "Diamond", given-names: "Joshua M."}]
+preferred-citation: {type: article, title: "Travelling waves reveal a dynamic seizure source in human focal epilepsy", journal: Brain, year: 2021, volume: 144, issue: 6, start: 1751, end: 1763, doi: "10.1093/brain/awab089", authors: [{family-names: "Diamond", given-names: "J. M."}, {family-names: "Diamond", given-names: "B. E."}, {family-names: "Trotta", given-names: "M. S."}, {family-names: "Dembny", given-names: "K."}, {family-names: "Inati", given-names: "S. K."}, {family-names: "Zaghloul", given-names: "K. A."}]}
+references: [{type: article, title: "Interictal discharges in the human brain are travelling waves arising from an epileptogenic source", journal: Brain, year: 2023, volume: 146, issue: 5, start: 1903, end: 1915, doi: "10.1093/brain/awad015", authors: [{family-names: "Diamond", given-names: "J. M."}, {family-names: "Withers", given-names: "C. P."}, {family-names: "Chapeton", given-names: "J. I."}, {family-names: "Rahman", given-names: "S."}, {family-names: "Inati", given-names: "S. K."}, {family-names: "Zaghloul", given-names: "K. A."}]}]
