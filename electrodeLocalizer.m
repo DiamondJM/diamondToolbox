@@ -94,12 +94,19 @@ classdef electrodeLocalizer < handle
             % Optional name-value:
             %   chanNames       - cell array of channel names (default {})
             %   forceNew        - re-run even if complete (default false)
+            %   autoRun         - run the pipeline from the constructor
+            %                     (default true). Pass false to get a bare
+            %                     object, then call el.run('manual',false) etc.
+            %   manual          - passed to run(): true = CT slicer (default),
+            %                     false = detectElectrodes + namingGUI
             %   freesurfer_bin  - path to FreeSurfer bin directory
             %   afni_bin        - path to AFNI bin directory
 
             p = inputParser;
             addParameter(p, 'chanNames',      {});
             addParameter(p, 'forceNew',       false);
+            addParameter(p, 'autoRun',        true);
+            addParameter(p, 'manual',         true);
             addParameter(p, 'freesurfer_bin', electrodeLocalizer.defaultFsBin());
             addParameter(p, 'afni_bin',       electrodeLocalizer.AFNI_BIN_DEFAULT);
             parse(p, varargin{:});
@@ -112,6 +119,8 @@ classdef electrodeLocalizer < handle
             self.chanNames  = p.Results.chanNames;
 
             self.setupDirectories();
+
+            if ~p.Results.autoRun, return; end
 
             if ~forceNew && self.isComplete()
                 fprintf('[electrodeLocalizer] Localization already complete for %s. Skipping.\n', subj);
@@ -126,7 +135,7 @@ classdef electrodeLocalizer < handle
                 return;
             end
 
-            self.run('forceNew', forceNew);
+            self.run('forceNew', forceNew, 'manual', p.Results.manual);
         end
 
         % -----------------------------------------------------------------
@@ -195,6 +204,12 @@ classdef electrodeLocalizer < handle
             leadsFile  = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
             leadsReady = ~forceNew && exist(leadsFile, 'file') == 2;
 
+            % Acquire MRI/CT before surface stages — recon-all needs mr_pre.nii.
+            if ~leadsReady
+                self.checkPrerequisites('errorIfMissing', true);
+                self.getInputFiles();
+            end
+
             % Surface stages self-check; always attempt so SUMA gets run
             % when FreeSurfer is done but AFNI hasn't been run yet.
             self.runSurface();           % never force — recon-all takes hours
@@ -202,8 +217,6 @@ classdef electrodeLocalizer < handle
 
             % CT pipeline and electrode naming only needed if leads.csv absent.
             if ~leadsReady
-                self.checkPrerequisites('errorIfMissing', true);
-                self.getInputFiles();
                 self.coregisterCT('forceNew', forceNew);
                 if isempty(self.chanNames)
                     self.chanNames = sourceLocalizer.loadChanNamesFromFile();
@@ -259,7 +272,7 @@ classdef electrodeLocalizer < handle
                     src = fullfile(d, f);
                     electrodeLocalizer.validateLeadsCSV(src, self.chanNames);
                     if ~exist(talDir, 'dir'), mkdir(talDir); end
-                    copyfile(src, leadsFile);
+                    electrodeLocalizer.importLeadsCSV(src, leadsFile);
                     fprintf('[import] leads.csv copied to %s\n', leadsFile);
                 else
                     fprintf('[import] leads.csv skipped.\n');
@@ -497,6 +510,18 @@ classdef electrodeLocalizer < handle
                 self.convertToNii(fullfile(d, f), ctDest);
             else
                 fprintf('[Stage 2] CT already present: %s\n', ctDest);
+            end
+
+            % Reorient CT to RAI so voxel axes are R/L, A/P, S/I.  Some CTs
+            % (e.g. coronal reformats, LSP) store dims in a different order;
+            % the slicer and ctRasToFS both assume an axis-aligned RAI volume.
+            % Also fix the Stage 5 work copy: align.sh registers an RAI
+            % reorientation (ct_implant+orig), so reorienting the .nii makes
+            % it match the existing transform rather than invalidating it.
+            self.reorientToRAI(ctDest);
+            ctWork = fullfile(self.locDirs.ct_1_xfm, 'ct_implant.nii');
+            if exist(ctWork, 'file') == 2
+                self.reorientToRAI(ctWork);
             end
         end
 
@@ -1480,6 +1505,10 @@ classdef electrodeLocalizer < handle
                     % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
                     % Flip each axis where NIfTI and BRIK directions are opposite.
                     % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
+                    [~, ctAx] = max(abs(Txfm(1:3,1:3)), [], 2);
+                    assert(isequal(ctAx(:)', [1 2 3]), ...
+                        ['[manualLocalize] CT voxel axes are not R/L, A/P, S/I ordered: %s\n' ...
+                         'Reorient ct_implant.nii to RAI and re-run coregisterCT.'], ctFile);
                     ct_bvox = vox_0;
                     if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
                     if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
@@ -2035,6 +2064,26 @@ classdef electrodeLocalizer < handle
     end % methods
 
     methods (Access = private)
+
+        function reorientToRAI(self, niiFile)
+            % Reorient a NIfTI in place to AFNI RAI (NIfTI LPS) with
+            % 3dresample.  Pure axis permute/flip, no interpolation.
+            % No-op if the volume is already RAI.
+            T = niftiinfo(niiFile).Transform.T;    % row-vector: mm = [i j k 1] * T
+            [~, ax] = max(abs(T(1:3,1:3)), [], 2);
+            if isequal(ax(:)', [1 2 3]) && T(1,1) < 0 && T(2,2) < 0 && T(3,3) > 0
+                return;
+            end
+            fprintf('[Stage 2] Reorienting to RAI: %s\n', niiFile);
+            tmpFile = [niiFile(1:end-4) '_rai_tmp.nii'];
+            cmd = sprintf('"%s" -orient RAI -inset "%s" -prefix "%s" -overwrite', ...
+                fullfile(self.afniBin, '3dresample'), niiFile, tmpFile);
+            [st, out] = unix(cmd);
+            if st ~= 0 || exist(tmpFile, 'file') ~= 2
+                error('[electrodeLocalizer] 3dresample failed reorienting %s:\n%s', niiFile, out);
+            end
+            movefile(tmpFile, niiFile);
+        end
 
         function convertToNii(self, srcFile, destFile)
             % Convert an imaging file to uncompressed NIfTI at destFile.
@@ -2644,16 +2693,64 @@ classdef electrodeLocalizer < handle
             p = fullfile(base, 'bin');
         end
 
-        function validateLeadsCSV(filepath, chanNames)
-            % Validate that a CSV file is a usable leads table.
-            % Errors if required columns are absent.
-            % Warns if chanNames entries are missing from the file.
-
+        function T = readLeadsTable(filepath)
+            % Read a contact-coordinate CSV into a table with columns
+            % chanName, x, y, z (plus any other columns, untouched).
+            %
+            % Column names are matched case-insensitively. If no single
+            % channel-name column exists but a stem column (ID / stem /
+            % electrode / shaft / lead) and a contact-number column
+            % (label / number / contact / index) are both present, they are
+            % concatenated: stem 'LANT' + number 1 -> chanName 'LANT1'.
             try
-                T = readtable(filepath);
+                T = readtable(filepath, 'TextType', 'char');
             catch e
                 error('[electrodeLocalizer] Could not read %s: %s', filepath, e.message);
             end
+            vn = T.Properties.VariableNames;
+            lc = lower(vn);
+
+            % Standardise x/y/z names
+            for c = {'x','y','z'}
+                k = find(strcmp(lc, c{1}), 1);
+                if ~isempty(k), T.Properties.VariableNames{k} = c{1}; end
+            end
+
+            if ~ismember('chanName', T.Properties.VariableNames)
+                nameCols = {'channame','channel','channel_name','name'};
+                stemCols = {'id','stem','shaft','lead','electrode','electrodename','group'};
+                numCols  = {'label','number','num','contact','contactnumber','index','idx','n'};
+
+                kName = find(ismember(lc, nameCols), 1);
+                kStem = find(ismember(lc, stemCols), 1);
+                kNum  = find(ismember(lc, numCols),  1);
+
+                if ~isempty(kStem) && ~isempty(kNum)
+                    stem = T.(vn{kStem});
+                    num  = T.(vn{kNum});
+                    if isnumeric(stem), stem = arrayfun(@num2str, stem, 'UniformOutput', false); end
+                    if isnumeric(num),  num  = arrayfun(@num2str, num,  'UniformOutput', false); end
+                    stem = strtrim(cellstr(stem));
+                    num  = strtrim(cellstr(num));
+                    T.chanName = strcat(stem, num);
+                    fprintf('[electrodeLocalizer] Combined columns "%s" + "%s" into chanName (e.g. %s).\n', ...
+                        vn{kStem}, vn{kNum}, T.chanName{1});
+                elseif ~isempty(kName)
+                    T.Properties.VariableNames{kName} = 'chanName';
+                end
+            end
+            if ismember('chanName', T.Properties.VariableNames)
+                T.chanName = cellstr(T.chanName);
+            end
+        end
+
+        function validateLeadsCSV(filepath, chanNames)
+            % Validate that a CSV file is a usable leads table.
+            % Errors if required columns are absent (after smart stem+number
+            % grouping, see readLeadsTable).
+            % Warns if chanNames entries are missing from the file.
+
+            T = electrodeLocalizer.readLeadsTable(filepath);
 
             required = {'chanName','x','y','z'};
             missing  = required(~ismember(required, T.Properties.VariableNames));
@@ -2668,6 +2765,20 @@ classdef electrodeLocalizer < handle
                     warning('[electrodeLocalizer] %d channel(s) in chanNames not found in leads.csv:\n  %s', ...
                         numel(absent), strjoin(absent, ', '));
                 end
+            end
+        end
+
+        function importLeadsCSV(src, dest)
+            % Write src to dest as a normalised leads.csv. Files already in
+            % chanName,x,y,z form are copied verbatim; otherwise the smart
+            % reader's table is written.
+            T = electrodeLocalizer.readLeadsTable(src);
+            raw = readtable(src, 'TextType', 'char');
+            if all(ismember({'chanName','x','y','z'}, raw.Properties.VariableNames))
+                copyfile(src, dest);
+            else
+                writetable(T(:, [{'chanName','x','y','z'}, ...
+                    setdiff(T.Properties.VariableNames, {'chanName','x','y','z'}, 'stable')]), dest);
             end
         end
 
@@ -2946,7 +3057,11 @@ classdef electrodeLocalizer < handle
                 end
                 if ~exist(talDir,  'dir'), mkdir(talDir);  end
                 if ~exist(sumaDir, 'dir'), mkdir(sumaDir); end
-                copyfile(src, dests{k});
+                if strcmp(names{k}, 'leads.csv')
+                    electrodeLocalizer.importLeadsCSV(src, dests{k});
+                else
+                    copyfile(src, dests{k});
+                end
                 fprintf('[import] %s → %s\n', src, dests{k});
                 present(k) = true;
                 listStrs{k} = ['[OK]  ' names{k}];
