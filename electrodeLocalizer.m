@@ -134,9 +134,10 @@ classdef electrodeLocalizer < handle
         % -----------------------------------------------------------------
 
         function tf = isComplete(self)
-            % Returns true if all 5 required localization files exist:
+            % Returns true if all 7 required localization files exist:
             %   tal/leads.csv, lh.pial.gii, rh.pial.gii,
-            %   lh.pial-outer-smoothed.gii, rh.pial-outer-smoothed.gii
+            %   lh.pial-outer-smoothed.gii, rh.pial-outer-smoothed.gii,
+            %   std.141.lh.pial.gii, std.141.rh.pial.gii
 
             leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
             sumaDir   = fullfile(self.locDirs.fs_subj, 'SUMA');
@@ -146,6 +147,8 @@ classdef electrodeLocalizer < handle
                 fullfile(sumaDir, 'rh.pial.gii'); ...
                 fullfile(sumaDir, 'lh.pial-outer-smoothed.gii'); ...
                 fullfile(sumaDir, 'rh.pial-outer-smoothed.gii'); ...
+                fullfile(sumaDir, 'std.141.lh.pial.gii'); ...
+                fullfile(sumaDir, 'std.141.rh.pial.gii'); ...
             };
             tf = all(cellfun(@(f) exist(f,'file')==2, files));
         end
@@ -269,6 +272,8 @@ classdef electrodeLocalizer < handle
                 'rh.pial-outer-smoothed.gii', 'right pial-outer-smoothed (required for projection)'; ...
                 'lh.pial.gii',                'left  pial (used for electrode naming display)';       ...
                 'rh.pial.gii',                'right pial (used for electrode naming display)';       ...
+                'std.141.lh.pial.gii',        'left  std.141 pial (198,812-vertex mesh for vertex indices)';  ...
+                'std.141.rh.pial.gii',        'right std.141 pial (198,812-vertex mesh for vertex indices)';  ...
             };
 
             for i = 1:size(surfaceFiles, 1)
@@ -289,7 +294,7 @@ classdef electrodeLocalizer < handle
                 end
 
                 src = fullfile(d, f);
-                electrodeLocalizer.validateGifti(src);
+                electrodeLocalizer.validateGifti(src, fname);
                 copyfile(src, dest);
                 fprintf('[import] %s copied to %s\n', fname, sumaDir);
             end
@@ -592,13 +597,25 @@ classdef electrodeLocalizer < handle
             forceNew = p.Results.forceNew;
 
             sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
-            lhGii   = fullfile(sumaDir, 'lh.pial-outer-smoothed.gii');
-            rhGii   = fullfile(sumaDir, 'rh.pial-outer-smoothed.gii');
-            done    = exist(lhGii, 'file') == 2 && exist(rhGii, 'file') == 2;
+            outGii  = fullfile(sumaDir, { ...
+                'lh.pial-outer-smoothed.gii'; 'rh.pial-outer-smoothed.gii'; ...
+                'std.141.lh.pial.gii';        'std.141.rh.pial.gii'});
+            done    = all(cellfun(@(f) exist(f,'file')==2, outGii));
 
             if done && ~forceNew
                 fprintf('[Stage 4] SUMA surfaces already exist; skipping.\n');
                 return;
+            end
+
+            % MapIcosahedron (inside @SUMA_Make_Spec_FS) needs the FreeSurfer
+            % spherical registration.  If only imported GIFTIs exist, the
+            % FreeSurfer subject directory must be recovered or recon-all re-run.
+            sphereReg = fullfile(self.locDirs.fs_subj, 'surf', {'lh.sphere.reg'; 'rh.sphere.reg'});
+            if ~all(cellfun(@(f) exist(f,'file')==2, sphereReg))
+                error(['[Stage 4] Cannot generate SUMA surfaces: FreeSurfer spherical ' ...
+                    'registration not found:\n  %s\n  %s\nCopy the subject''s full FreeSurfer ' ...
+                    'directory into %s, or re-run recon-all.'], ...
+                    sphereReg{1}, sphereReg{2}, self.locDirs.fs_subj);
             end
 
             fprintf('[Stage 4] Running SUMA to generate standard ld141 mesh...\n');
@@ -632,9 +649,10 @@ classdef electrodeLocalizer < handle
 
             % @SUMA_Make_Spec_FS sometimes exits 0 even on failure.
             % Verify the expected output actually exists.
-            if exist(lhGii, 'file') ~= 2 || exist(rhGii, 'file') ~= 2
-                error('[Stage 4] SUMA ran but expected output not found:\n  %s\n  %s', ...
-                    lhGii, rhGii);
+            missing = outGii(~cellfun(@(f) exist(f,'file')==2, outGii));
+            if ~isempty(missing)
+                error('[Stage 4] SUMA ran but expected output not found:\n  %s', ...
+                    strjoin(missing, '\n  '));
             end
         end
 
@@ -1626,7 +1644,10 @@ classdef electrodeLocalizer < handle
             %   rawXYZ      — [1×3] scanner RAS mm of the clicked point
             %   snappedXYZ  — [1×3] scanner RAS mm of nearest pial vertex
             %   vertex      — signed vertex index: negative = left hemi, positive = right hemi
-            %                 (abs(vertex) is the 1-based index into the pial GIFTI)
+            %                 (abs(vertex) is the 1-based index, 1..198812, into the
+            %                 subject's SUMA/std.141.{lh,rh}.pial.gii — the same
+            %                 convention as showPoint(v) and
+            %                 sourceLocalizer.convertVerticesToLocations)
             %   hemisphere  — 'lh' or 'rh'
 
             if nargin < 2 || isempty(imagePath)
@@ -1649,12 +1670,14 @@ classdef electrodeLocalizer < handle
             assert(exist(imagePath,'file')==2, ...
                 '[pointToSurface] File not found: %s', imagePath);
 
-            % Load pial surfaces
+            % Load the subject's std.141 pial surfaces (patient anatomy resampled
+            % onto the 198,812-vertex icosahedral mesh) so returned vertex
+            % indices match showPoint and the rest of the toolbox.
             sumaDir = fullfile(self.locDirs.fs_subj, 'SUMA');
-            lhFile  = fullfile(sumaDir, 'lh.pial.gii');
-            rhFile  = fullfile(sumaDir, 'rh.pial.gii');
+            lhFile  = fullfile(sumaDir, 'std.141.lh.pial.gii');
+            rhFile  = fullfile(sumaDir, 'std.141.rh.pial.gii');
             assert(exist(lhFile,'file')==2 && exist(rhFile,'file')==2, ...
-                '[pointToSurface] Pial GIFTIs not found in:\n  %s\nRun recon-all + SUMA first.', sumaDir);
+                '[pointToSurface] std.141 pial GIFTIs not found in:\n  %s\nRun recon-all + SUMA (@SUMA_Make_Spec_FS -ld 141) first.', sumaDir);
             lhVerts = gifti(lhFile).vertices;   % N×3 scanner RAS
             rhVerts = gifti(rhFile).vertices;
 
@@ -1722,8 +1745,11 @@ classdef electrodeLocalizer < handle
             %   el.showPoint(pointIn, '/path/to.nii')    % explicit image path (optional)
             %
             % Vertex sign convention (n×1 integer input):
-            %   negative  —  left  hemisphere  (abs(v) is the 1-based GIFTI vertex index)
+            %   negative  —  left  hemisphere
             %   positive  —  right hemisphere
+            %   abs(v) is the 1-based index, 1..198812, into the subject's
+            %   SUMA/std.141.{lh,rh}.pial.gii — the same mesh pointToSurface
+            %   snaps to, so showPoint(pts(k).vertex) lands on pts(k).snappedXYZ.
             %
             % Struct input (from pointToSurface): uses snappedXYZ if present,
             % otherwise rawXYZ.
@@ -2638,13 +2664,21 @@ classdef electrodeLocalizer < handle
             end
         end
 
-        function validateGifti(filepath)
-            % Validate that a file is a loadable gifti object.
+        function validateGifti(filepath, destName)
+            % Validate that a file is a loadable gifti object.  If destName
+            % is a std.141 surface, also require the 198,812-vertex mesh.
             try
-                g = gifti(filepath);  %#ok<NASGU>
+                g = gifti(filepath);
             catch e
                 error('[electrodeLocalizer] Could not load gifti file %s: %s', ...
                     filepath, e.message);
+            end
+            if nargin > 1 && startsWith(destName, 'std.141.')
+                nV = size(g.vertices, 1);
+                if nV ~= 198812
+                    error(['[electrodeLocalizer] %s has %d vertices; %s must be the ' ...
+                        'std.141 mesh (198812 vertices).'], filepath, nV, destName);
+                end
             end
         end
 
@@ -2690,7 +2724,7 @@ classdef electrodeLocalizer < handle
 
         function dlg = localizationSetupDialog(self, forceNew)
             % Dark-themed modal dialog shown when required localization files
-            % are missing, or when forceNew=true.  A listbox shows all 5
+            % are missing, or when forceNew=true.  A listbox shows all 7
             % files with OK/blank status; selecting a row updates the
             % description panel.  Create runs the full pipeline; Import
             % copies an existing file into place (always allowed, even if
@@ -2709,6 +2743,8 @@ classdef electrodeLocalizer < handle
                 'rh.pial.gii'; ...
                 'lh.pial-outer-smoothed.gii'; ...
                 'rh.pial-outer-smoothed.gii'; ...
+                'std.141.lh.pial.gii'; ...
+                'std.141.rh.pial.gii'; ...
             };
             dests = { ...
                 fullfile(talDir,  'leads.csv'); ...
@@ -2716,6 +2752,8 @@ classdef electrodeLocalizer < handle
                 fullfile(sumaDir, 'rh.pial.gii'); ...
                 fullfile(sumaDir, 'lh.pial-outer-smoothed.gii'); ...
                 fullfile(sumaDir, 'rh.pial-outer-smoothed.gii'); ...
+                fullfile(sumaDir, 'std.141.lh.pial.gii'); ...
+                fullfile(sumaDir, 'std.141.rh.pial.gii'); ...
             };
             descs = { ...
                 sprintf(['CSV table of electrode coordinates.\n' ...
@@ -2738,6 +2776,14 @@ classdef electrodeLocalizer < handle
                     'Convex-hull envelope of the right pial surface.\n' ...
                     'Required for snapping subdural contacts to the cortex.\n' ...
                     'Destination: %s'], dests{5}); ...
+                sprintf(['Left pial surface on the std.141 mesh (GIFTI, 198,812 vertices).\n' ...
+                    'This patient''s anatomy resampled by @SUMA_Make_Spec_FS -ld 141.\n' ...
+                    'Required for vertex indices (pointToSurface, showPoint, plotting).\n' ...
+                    'Destination: %s'], dests{6}); ...
+                sprintf(['Right pial surface on the std.141 mesh (GIFTI, 198,812 vertices).\n' ...
+                    'This patient''s anatomy resampled by @SUMA_Make_Spec_FS -ld 141.\n' ...
+                    'Required for vertex indices (pointToSurface, showPoint, plotting).\n' ...
+                    'Destination: %s'], dests{7}); ...
             };
             N       = numel(names);
             present = cellfun(@(f) exist(f,'file')==2, dests);
@@ -2885,7 +2931,7 @@ classdef electrodeLocalizer < handle
                     if strcmp(names{k}, 'leads.csv')
                         electrodeLocalizer.validateLeadsCSV(src, self.chanNames);
                     else
-                        electrodeLocalizer.validateGifti(src);
+                        electrodeLocalizer.validateGifti(src, names{k});
                     end
                 catch e
                     warndlg(e.message, sprintf('Validation failed — %s', names{k}));
