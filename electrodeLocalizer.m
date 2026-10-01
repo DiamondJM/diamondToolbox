@@ -102,6 +102,8 @@ classdef electrodeLocalizer < handle
             %   freesurfer_bin  - path to FreeSurfer bin directory
             %   afni_bin        - path to AFNI bin directory
 
+            removeClaudeWorktreesFromPath();
+
             p = inputParser;
             addParameter(p, 'chanNames',      {});
             addParameter(p, 'forceNew',       false);

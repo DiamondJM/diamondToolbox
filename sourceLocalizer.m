@@ -75,6 +75,8 @@ classdef sourceLocalizer < handle
             %       sl.loadTimeSeries()
             %   Then call sl.localizationManager().
 
+            removeClaudeWorktreesFromPath();
+
             p = inputParser;
             addParameter(p, 'chanNames',                  {});
             addParameter(p, 'forceNewElectrodeLocalizer', false);
