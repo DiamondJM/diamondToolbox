@@ -94,12 +94,19 @@ classdef electrodeLocalizer < handle
             % Optional name-value:
             %   chanNames       - cell array of channel names (default {})
             %   forceNew        - re-run even if complete (default false)
+            %   autoRun         - run the pipeline from the constructor
+            %                     (default true). Pass false to get a bare
+            %                     object, then call el.run('manual',false) etc.
+            %   manual          - passed to run(): true = CT slicer (default),
+            %                     false = detectElectrodes + namingGUI
             %   freesurfer_bin  - path to FreeSurfer bin directory
             %   afni_bin        - path to AFNI bin directory
 
             p = inputParser;
             addParameter(p, 'chanNames',      {});
             addParameter(p, 'forceNew',       false);
+            addParameter(p, 'autoRun',        true);
+            addParameter(p, 'manual',         true);
             addParameter(p, 'freesurfer_bin', electrodeLocalizer.defaultFsBin());
             addParameter(p, 'afni_bin',       electrodeLocalizer.AFNI_BIN_DEFAULT);
             parse(p, varargin{:});
@@ -112,6 +119,8 @@ classdef electrodeLocalizer < handle
             self.chanNames  = p.Results.chanNames;
 
             self.setupDirectories();
+
+            if ~p.Results.autoRun, return; end
 
             if ~forceNew && self.isComplete()
                 fprintf('[electrodeLocalizer] Localization already complete for %s. Skipping.\n', subj);
@@ -126,7 +135,7 @@ classdef electrodeLocalizer < handle
                 return;
             end
 
-            self.run('forceNew', forceNew);
+            self.run('forceNew', forceNew, 'manual', p.Results.manual);
         end
 
         % -----------------------------------------------------------------
