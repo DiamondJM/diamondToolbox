@@ -272,7 +272,7 @@ classdef electrodeLocalizer < handle
                     src = fullfile(d, f);
                     electrodeLocalizer.validateLeadsCSV(src, self.chanNames);
                     if ~exist(talDir, 'dir'), mkdir(talDir); end
-                    copyfile(src, leadsFile);
+                    electrodeLocalizer.importLeadsCSV(src, leadsFile);
                     fprintf('[import] leads.csv copied to %s\n', leadsFile);
                 else
                     fprintf('[import] leads.csv skipped.\n');
@@ -2686,16 +2686,64 @@ classdef electrodeLocalizer < handle
             p = fullfile(base, 'bin');
         end
 
-        function validateLeadsCSV(filepath, chanNames)
-            % Validate that a CSV file is a usable leads table.
-            % Errors if required columns are absent.
-            % Warns if chanNames entries are missing from the file.
-
+        function T = readLeadsTable(filepath)
+            % Read a contact-coordinate CSV into a table with columns
+            % chanName, x, y, z (plus any other columns, untouched).
+            %
+            % Column names are matched case-insensitively. If no single
+            % channel-name column exists but a stem column (ID / stem /
+            % electrode / shaft / lead) and a contact-number column
+            % (label / number / contact / index) are both present, they are
+            % concatenated: stem 'LANT' + number 1 -> chanName 'LANT1'.
             try
-                T = readtable(filepath);
+                T = readtable(filepath, 'TextType', 'char');
             catch e
                 error('[electrodeLocalizer] Could not read %s: %s', filepath, e.message);
             end
+            vn = T.Properties.VariableNames;
+            lc = lower(vn);
+
+            % Standardise x/y/z names
+            for c = {'x','y','z'}
+                k = find(strcmp(lc, c{1}), 1);
+                if ~isempty(k), T.Properties.VariableNames{k} = c{1}; end
+            end
+
+            if ~ismember('chanName', T.Properties.VariableNames)
+                nameCols = {'channame','channel','channel_name','name'};
+                stemCols = {'id','stem','shaft','lead','electrode','electrodename','group'};
+                numCols  = {'label','number','num','contact','contactnumber','index','idx','n'};
+
+                kName = find(ismember(lc, nameCols), 1);
+                kStem = find(ismember(lc, stemCols), 1);
+                kNum  = find(ismember(lc, numCols),  1);
+
+                if ~isempty(kStem) && ~isempty(kNum)
+                    stem = T.(vn{kStem});
+                    num  = T.(vn{kNum});
+                    if isnumeric(stem), stem = arrayfun(@num2str, stem, 'UniformOutput', false); end
+                    if isnumeric(num),  num  = arrayfun(@num2str, num,  'UniformOutput', false); end
+                    stem = strtrim(cellstr(stem));
+                    num  = strtrim(cellstr(num));
+                    T.chanName = strcat(stem, num);
+                    fprintf('[electrodeLocalizer] Combined columns "%s" + "%s" into chanName (e.g. %s).\n', ...
+                        vn{kStem}, vn{kNum}, T.chanName{1});
+                elseif ~isempty(kName)
+                    T.Properties.VariableNames{kName} = 'chanName';
+                end
+            end
+            if ismember('chanName', T.Properties.VariableNames)
+                T.chanName = cellstr(T.chanName);
+            end
+        end
+
+        function validateLeadsCSV(filepath, chanNames)
+            % Validate that a CSV file is a usable leads table.
+            % Errors if required columns are absent (after smart stem+number
+            % grouping, see readLeadsTable).
+            % Warns if chanNames entries are missing from the file.
+
+            T = electrodeLocalizer.readLeadsTable(filepath);
 
             required = {'chanName','x','y','z'};
             missing  = required(~ismember(required, T.Properties.VariableNames));
@@ -2710,6 +2758,20 @@ classdef electrodeLocalizer < handle
                     warning('[electrodeLocalizer] %d channel(s) in chanNames not found in leads.csv:\n  %s', ...
                         numel(absent), strjoin(absent, ', '));
                 end
+            end
+        end
+
+        function importLeadsCSV(src, dest)
+            % Write src to dest as a normalised leads.csv. Files already in
+            % chanName,x,y,z form are copied verbatim; otherwise the smart
+            % reader's table is written.
+            T = electrodeLocalizer.readLeadsTable(src);
+            raw = readtable(src, 'TextType', 'char');
+            if all(ismember({'chanName','x','y','z'}, raw.Properties.VariableNames))
+                copyfile(src, dest);
+            else
+                writetable(T(:, [{'chanName','x','y','z'}, ...
+                    setdiff(T.Properties.VariableNames, {'chanName','x','y','z'}, 'stable')]), dest);
             end
         end
 
@@ -2988,7 +3050,11 @@ classdef electrodeLocalizer < handle
                 end
                 if ~exist(talDir,  'dir'), mkdir(talDir);  end
                 if ~exist(sumaDir, 'dir'), mkdir(sumaDir); end
-                copyfile(src, dests{k});
+                if strcmp(names{k}, 'leads.csv')
+                    electrodeLocalizer.importLeadsCSV(src, dests{k});
+                else
+                    copyfile(src, dests{k});
+                end
                 fprintf('[import] %s → %s\n', src, dests{k});
                 present(k) = true;
                 listStrs{k} = ['[OK]  ' names{k}];

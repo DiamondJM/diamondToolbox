@@ -2345,7 +2345,9 @@ classdef sourceLocalizer < handle
             %   .mat — loads a variable containing a cell array of strings.
             %   .csv — looks for a column named name/chanName/label/channel/
             %          electrode (case-insensitive); falls back to first column
-            %          for headerless files. Compatible with BIDS electrodes.tsv
+            %          for headerless files. If stem and contact number are in
+            %          separate columns (e.g. ID='LANT', Label=1) they are joined
+            %          ('LANT1'). Compatible with BIDS electrodes.tsv
             %          (rename .tsv to .csv or use the 'name' column directly).
             %   .fif — reads header only via FieldTrip ft_read_header;
             %          accepts both head-only files (e.g. *-head.fif) and
@@ -2360,7 +2362,7 @@ classdef sourceLocalizer < handle
                      '', ...
                      'Accepted formats:', ...
                      '  .mat  — MATLAB workspace containing a cell array of strings', ...
-                     '  .csv  — name/chanName/label column, or first column if no header', ...
+                     '  .csv  — name/chanName/label column (or separate stem + number columns, e.g. ID + Label), or first column if no header', ...
                      '  .fif  — MNE/FieldTrip file; channel names read from header', ...
                      '  .edf  — EDF/EDF+ file; channel names read from header only'}, ...
                     'Channel Names', ...
@@ -2402,13 +2404,35 @@ classdef sourceLocalizer < handle
             elseif strcmpi(ext, '.csv')
                 % Try to find a named column first (handles BIDS and similar
                 % formats where the column is called 'name', 'label', etc.).
-                T = readtable(fullPath, 'ReadVariableNames', true);
-                knownCols = {'channame','channames','name','names', ...
-                             'channel','channels','channel_name','channel_names', ...
-                             'label','labels','electrode','electrodes'};
-                colMatch = find(ismember(lower(T.Properties.VariableNames), knownCols), 1);
-                if ~isempty(colMatch)
-                    chanNames = T{:, colMatch};
+                T = readtable(fullPath, 'ReadVariableNames', true, 'TextType', 'char');
+                lc = lower(T.Properties.VariableNames);
+                nameCols = {'channame','channames','name','names', ...
+                            'channel','channels','channel_name','channel_names'};
+                stemCols = {'id','stem','shaft','lead','electrode','electrodename','group'};
+                numCols  = {'label','number','num','contact','contactnumber','index','idx','n'};
+                fallback = {'label','labels','electrode','electrodes'};
+                kName = find(ismember(lc, nameCols), 1);
+                kStem = find(ismember(lc, stemCols), 1);
+                kNum  = find(ismember(lc, numCols),  1);
+                kFall = find(ismember(lc, fallback), 1);
+                if ~isempty(kName)
+                    chanNames = T{:, kName};
+                elseif ~isempty(kStem) && ~isempty(kNum) && kStem ~= kNum
+                    % Stem and contact number in separate columns
+                    % (e.g. ID='LANT', Label=1 -> 'LANT1').
+                    stem = T{:, kStem};  num = T{:, kNum};
+                    if isnumeric(stem), stem = arrayfun(@num2str, stem, 'UniformOutput', false); end
+                    if isnumeric(num),  num  = arrayfun(@num2str, num,  'UniformOutput', false); end
+                    chanNames = strcat(strtrim(cellstr(stem)), strtrim(cellstr(num)));
+                    fprintf('Combined columns "%s" + "%s" into channel names (e.g. %s).\n', ...
+                        T.Properties.VariableNames{kStem}, T.Properties.VariableNames{kNum}, chanNames{1});
+                    [~, ia] = unique(chanNames, 'stable');
+                    if numel(ia) < numel(chanNames)
+                        dups = unique(chanNames(setdiff(1:numel(chanNames), ia)));
+                        warning('Duplicate channel names in file: %s', strjoin(dups, ', '));
+                    end
+                elseif ~isempty(kFall)
+                    chanNames = T{:, kFall};
                 else
                     % No recognised header — treat as headerless, take col 1.
                     T = readtable(fullPath, 'ReadVariableNames', false);
