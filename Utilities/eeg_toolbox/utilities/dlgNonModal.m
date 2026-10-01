@@ -4,8 +4,8 @@ function result = dlgNonModal(message, title, varargin)
 % Replacement for questdlg that does not set WindowStyle = 'modal', so
 % clicking on the MATLAB desktop behind the dialog does not pass through
 % to windows beneath MATLAB.  Dark-themed to match the electrodeLocalizer
-% setup dialog; the message area and buttons size themselves to their
-% text, so nothing is clipped.
+% setup dialog; the message area (scrollable if long) and buttons size
+% themselves to their text, so nothing is clipped.
 %
 % Usage:
 %   result = dlgNonModal(message, title, btn1)
@@ -50,19 +50,28 @@ fig = figure( ...
     'Position',    [round((ss(3)-W)/2) round(ss(4)/2) W 200], ...
     'CloseRequestFcn', @cbClose);
 
-% ---- message: wrap to the dialog width, then size the box to fit ----------
-hMsg = uicontrol(fig, 'Style', 'text', ...
+% ---- message: scrollable read-only box sized to the wrapped text ----------
+% Height = wrapped line count x measured single-line height, with margin
+% for platform font metrics; capped, with a scrollbar beyond the cap.
+probe = uicontrol(fig, 'Style', 'text', 'String', 'Ag', 'FontSize', MSG_FS, ...
+    'Units', 'pixels', 'Position', [0 0 W 100]);
+pe    = get(probe, 'Extent');
+lineH = pe(4);
+set(probe, 'Position', [0 0 W-PAD*2-24 100]);   % leave room for scrollbar
+wrapped = textwrap(probe, message);
+delete(probe);
+MSG_H = min(ceil(numel(wrapped) * lineH * 1.25) + 16, round(ss(4) * 0.5));
+
+hMsg = uicontrol(fig, 'Style', 'edit', ...
     'String',              message, ...
+    'Max',                 2, ...                 % multi-line + scrollbar
+    'Min',                 0, ...
     'FontSize',            MSG_FS, ...
     'ForegroundColor',     FG, ...
     'BackgroundColor',     BG, ...
     'HorizontalAlignment', 'left', ...
     'Units',               'pixels', ...
-    'Position',            [PAD 0 W-PAD*2 100]);
-wrapped = textwrap(hMsg, message);
-set(hMsg, 'String', wrapped);
-ext   = get(hMsg, 'Extent');
-MSG_H = min(ext(4) + 6, round(ss(4) * 0.6));
+    'Position',            [PAD 0 W-PAD*2 MSG_H]);
 
 totalH = PAD + BTN_H + PAD*2 + MSG_H + PAD + HDR_H + PAD;
 btnY   = PAD;
