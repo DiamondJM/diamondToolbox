@@ -102,6 +102,8 @@ classdef electrodeLocalizer < handle
             %   freesurfer_bin  - path to FreeSurfer bin directory
             %   afni_bin        - path to AFNI bin directory
 
+            removeClaudeWorktreesFromPath();
+
             p = inputParser;
             addParameter(p, 'chanNames',      {});
             addParameter(p, 'forceNew',       false);
@@ -204,10 +206,11 @@ classdef electrodeLocalizer < handle
             leadsFile  = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
             leadsReady = ~forceNew && exist(leadsFile, 'file') == 2;
 
-            % Acquire MRI/CT before surface stages — recon-all needs mr_pre.nii.
+            % Acquire the MRI before surface stages — recon-all needs
+            % mr_pre.nii.  The CT is acquired later, only if needed.
             if ~leadsReady
                 self.checkPrerequisites('errorIfMissing', true);
-                self.getInputFiles();
+                self.getInputFiles('ct', false);
             end
 
             % Surface stages self-check; always attempt so SUMA gets run
@@ -217,6 +220,29 @@ classdef electrodeLocalizer < handle
 
             % CT pipeline and electrode naming only needed if leads.csv absent.
             if ~leadsReady
+                % A Slicer scene under <subj>/Slicer*/ already holds
+                % registered, named contacts: offer importing it (default)
+                % instead of registering and localizing from scratch.
+                mrbPath = self.findSlicerScene();
+                if ~isempty(mrbPath)
+                    [~, mrbName, mrbExt] = fileparts(mrbPath);
+                    choice = dlgNonModal({ ...
+                        sprintf('A 3D Slicer scene was found for %s:', self.subj), ...
+                        ['  ' mrbName mrbExt], '', ...
+                        'Import Slicer: take electrode contacts from the scene (its own CT registration).', ...
+                        'Fresh localization: run CT registration and electrode localization here.'}, ...
+                        'Electrode localization', 'Import Slicer', 'Fresh localization');
+                    if isempty(choice)
+                        error('electrodeLocalizer:cancelled', ...
+                            '[electrodeLocalizer] Localization cancelled by user.');
+                    end
+                    if strcmp(choice, 'Import Slicer')
+                        self.importSlicerScene(mrbPath, 'overwrite', true);
+                        return;
+                    end
+                end
+
+                self.getInputFiles();          % MR already present; acquires CT
                 self.coregisterCT('forceNew', forceNew);
                 if isempty(self.chanNames)
                     self.chanNames = sourceLocalizer.loadChanNamesFromFile();
@@ -229,6 +255,9 @@ classdef electrodeLocalizer < handle
                 end
                 self.projectElectrodes();
                 self.writeLeads();
+                if ~useManual   % manual path already reviewed in reviewGUI
+                    self.reviewLeads();
+                end
             end
         end
 
@@ -318,6 +347,138 @@ classdef electrodeLocalizer < handle
             else
                 fprintf('Note: some required files are still missing.\n');
                 fprintf('Call checkPrerequisites() for a full status report.\n\n');
+            end
+        end
+
+        % -----------------------------------------------------------------
+        %% Import contacts from a 3D Slicer scene (.mrb)
+        % -----------------------------------------------------------------
+
+        function T = importSlicerScene(self, mrbPath, varargin)
+            % Write tal/leads.csv from electrode contacts placed in a 3D
+            % Slicer scene, converted into this subject's MR scanner RAS
+            % (the space of the FreeSurfer/SUMA surfaces).
+            %
+            % Usage:
+            %   el.importSlicerScene()                      % file dialog
+            %   el.importSlicerScene('/path/Scene.mrb')
+            %   el.importSlicerScene(mrbPath, 'overwrite', true)
+            %
+            % Contacts are read from the scene's curve markups (one curve
+            % per electrode, numeric control-point labels); names are
+            % curve name + label, e.g. LANT + 1 -> LANT1.  The scene's
+            % world space is usually a planning space (e.g. ROSA), not
+            % scanner RAS, so contacts are mapped through the transform
+            % the subject's MR sits under in the scene.  That MR is found
+            % by matching scene volumes against mr_pre.nii; the import
+            % errors if no scene volume matches.
+            %
+            % Optional name-value:
+            %   overwrite - replace an existing leads.csv (default false)
+            %   type      - contact type for all imported contacts
+            %               (default 'depth'; 'subdural' gets projected)
+            %   review    - open the 3-D Accept/Discard review after writing
+            %               (default true); Discard deletes leads.csv
+
+            ip = inputParser;
+            ip.addParameter('overwrite', false);
+            ip.addParameter('type',      'depth');
+            ip.addParameter('review',    true);
+            ip.parse(varargin{:});
+
+            leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+            assert(ip.Results.overwrite || exist(leadsFile, 'file') ~= 2, ...
+                '[importSlicerScene] leads.csv already exists: %s\nPass ''overwrite'', true to replace it.', leadsFile);
+
+            if nargin < 2 || isempty(mrbPath)
+                [f, d] = uigetfile('*.mrb', 'Select Slicer scene (.mrb)');
+                if isequal(f, 0), T = []; return; end
+                mrbPath = fullfile(d, f);
+            end
+
+            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            T = electrodeLocalizer.readSlicerScene(mrbPath, mrNii);
+
+            T.type = repmat({ip.Results.type}, height(T), 1);
+            self.leads = T(:, {'chanName','type','x','y','z'});
+            if any(strcmp(self.leads.type, 'subdural'))
+                self.projectElectrodes();
+            end
+            self.writeLeads();
+            if ~isempty(self.chanNames)
+                electrodeLocalizer.validateLeadsCSV(leadsFile, self.chanNames);
+            end
+            if ip.Results.review
+                self.reviewLeads();
+            end
+        end
+
+        function mrbPath = findSlicerScene(self)
+            % Newest .mrb scene under <rootFolder>/<subj>/Slicer*/ (any
+            % depth, folder name case-insensitive), or '' if none.
+            mrbPath = '';
+            subjDir = fullfile(self.rootFolder, self.subj);
+            d = dir(subjDir);
+            d = d([d.isdir] & startsWith(lower({d.name}), 'slicer'));
+            hits = [];
+            for k = 1:numel(d)
+                hits = [hits; dir(fullfile(subjDir, d(k).name, '**', '*.mrb'))]; %#ok<AGROW>
+            end
+            if isempty(hits), return; end
+            [~, i] = max([hits.datenum]);
+            mrbPath = fullfile(hits(i).folder, hits(i).name);
+            if numel(hits) > 1
+                fprintf('[electrodeLocalizer] %d Slicer scenes found; using newest: %s\n', numel(hits), mrbPath);
+            end
+        end
+
+        function accepted = reviewLeads(self)
+            % Blocking 3-D review of tal/leads.csv: pial surfaces with a
+            % labelled dot per contact, coloured by electrode.  Accept
+            % keeps the file; Discard deletes it (closing the window
+            % counts as Accept).
+            leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+            if isempty(self.leads)
+                self.leads = readtable(leadsFile, 'TextType', 'char');
+            end
+            xyz   = [self.leads.x, self.leads.y, self.leads.z];
+            names = self.leads.chanName;
+
+            accepted = true;
+            fig = figure('Name', sprintf('Review leads — %s', self.subj), ...
+                'NumberTitle','off','Color',[0.08 0.08 0.08], ...
+                'Position',[80 80 1100 820]);
+            ax = axes('Parent',fig,'Color','k', ...
+                'XColor','none','YColor','none','ZColor','none', ...
+                'Position',[0 0.07 1 0.93]);
+            uicontrol('Parent',fig,'Style','text', ...
+                'String',sprintf('%d contacts.  Drag to rotate.  Accept keeps leads.csv; Discard deletes it.', size(xyz,1)), ...
+                'Units','normalized','Position',[0.02 0.015 0.60 0.035], ...
+                'BackgroundColor',[0.08 0.08 0.08],'ForegroundColor',[0.7 0.7 0.7], ...
+                'FontSize',10,'HorizontalAlignment','left');
+            uicontrol('Parent',fig,'Style','pushbutton','String','Accept', ...
+                'Units','normalized','Position',[0.64 0.01 0.16 0.05], ...
+                'BackgroundColor',[0.18 0.42 0.18],'ForegroundColor','w', ...
+                'FontSize',11,'FontWeight','bold','Callback',@(~,~)delete(fig));
+            uicontrol('Parent',fig,'Style','pushbutton','String','Discard', ...
+                'Units','normalized','Position',[0.82 0.01 0.16 0.05], ...
+                'BackgroundColor',[0.65 0.10 0.10],'ForegroundColor','w', ...
+                'FontSize',11,'Callback',@cbDiscard);
+
+            self.renderLeadsOnAxes(ax, xyz, names);
+            uiwait(fig);
+
+            if ~accepted
+                if exist(leadsFile, 'file') == 2, delete(leadsFile); end
+                self.leads = [];
+                fprintf('[reviewLeads] Discarded: %s deleted.\n', leadsFile);
+            else
+                fprintf('[reviewLeads] Accepted: %s\n', leadsFile);
+            end
+
+            function cbDiscard(~,~)
+                accepted = false;
+                delete(fig);
             end
         end
 
@@ -458,14 +619,22 @@ classdef electrodeLocalizer < handle
         %% Stage 2 — acquire input image files
         % -----------------------------------------------------------------
 
-        function getInputFiles(self)
+        function getInputFiles(self, varargin)
             % Prompt for pre-op MRI and post-op CT imaging files if not
             % already present in the zloc folder structure.
+            %
+            % Optional name-value:
+            %   ct - also acquire the CT (default true; false for paths
+            %        that take contacts from elsewhere, e.g. a Slicer scene)
             %
             % Accepted formats: .nii, .nii.gz, .mgz
             %   .nii     — copied directly.
             %   .nii.gz  — decompressed via MATLAB gunzip.
             %   .mgz     — converted via FreeSurfer mri_convert (uses fsBin).
+
+            ip = inputParser;
+            ip.addParameter('ct', true);
+            ip.parse(varargin{:});
 
             filter = {'*.*', 'All files (*.nii, *.nii.gz, *.mgz)'};
 
@@ -491,6 +660,8 @@ classdef electrodeLocalizer < handle
             else
                 fprintf('[Stage 2] MRI already present: %s\n', mrDest);
             end
+
+            if ~ip.Results.ct, return; end
 
             % CT
             if exist(ctDest, 'file') ~= 2
@@ -1306,7 +1477,7 @@ classdef electrodeLocalizer < handle
             function cbConfirm(~,~)
                 name = resolvedName();
                 if isempty(name)
-                    msgbox('Enter a channel name or use Mark as Artifact.','','warn');
+                    dlgNonModal('Enter a channel name or use Mark as Artifact.', 'Channel name needed', 'OK');
                     return;
                 end
                 typeStrs    = get(hType,'String');
@@ -1351,8 +1522,8 @@ classdef electrodeLocalizer < handle
             end
 
             function cbQuit(~,~)
-                choice = questdlg('Quit naming? All assignments will be discarded.', ...
-                    'Quit','Quit','Cancel','Cancel');
+                choice = dlgNonModal('Quit naming? All assignments will be discarded.', ...
+                    'Quit naming', 'Cancel', 'Quit');
                 if ~strcmp(choice,'Quit'), return; end
                 userQuit = true;
                 delete(fig);
@@ -1978,13 +2149,17 @@ classdef electrodeLocalizer < handle
                 material(ax, 'dull');
             end
 
+            % One colour per electrode (name minus trailing contact number)
             N = size(xyz,1);
+            elecs = regexprep(names(:), '\s*\d+$', '');
+            [~, ~, g] = unique(elecs, 'stable');
+            cmap = hsv(max(g)) * 0.8 + 0.2;
             scatter3(ax, xyz(:,1), xyz(:,2), xyz(:,3), 70, ...
-                repmat([0.15 0.35 0.85], N, 1), 'filled', 'HitTest','off', ...
+                cmap(g,:), 'filled', 'HitTest','off', ...
                 'MarkerEdgeColor','w','LineWidth',0.5);
             for ii = 1:N
                 text(ax, xyz(ii,1)+1, xyz(ii,2), xyz(ii,3), names{ii}, ...
-                    'Color',[0.55 0.75 1.00],'FontSize',8, ...
+                    'Color',cmap(g(ii),:),'FontSize',8, ...
                     'FontWeight','bold','HitTest','off');
             end
 
@@ -2649,7 +2824,181 @@ classdef electrodeLocalizer < handle
 
     end % methods (Access = private)
 
+    methods (Static)
+
+        function T = readSlicerScene(mrbPath, mrNii)
+            % Read electrode contacts from a 3D Slicer scene bundle (.mrb)
+            % and return them in mrNii's scanner RAS as a table with
+            % columns chanName, x, y, z, electrode, contact.
+            %
+            % Coordinate chain, all in RAS 4x4 (MRML matrixTransformToParent):
+            %   contact (curve-local) --W_curve--> scene world
+            %   scene world --inv(W_mr)--> MR local = mrNii scanner RAS
+            % where W_mr is the transform chain of the scene volume whose
+            % geometry matches mrNii (same centre within 3 mm).
+
+            assert(exist(mrbPath, 'file') == 2, '[readSlicerScene] Not found: %s', mrbPath);
+            tmpDir = tempname;
+            unzip(mrbPath, tmpDir);
+            cleanup = onCleanup(@() rmdir(tmpDir, 's'));
+            mrmlFile = dir(fullfile(tmpDir, '**', '*.mrml'));
+            assert(~isempty(mrmlFile), '[readSlicerScene] No .mrml scene file in %s', mrbPath);
+            sceneDir = mrmlFile(1).folder;
+            nodes = electrodeLocalizer.parseMrml(fullfile(sceneDir, mrmlFile(1).name));
+
+            % ---- Find the scene volume that is this subject's MR ----
+            info = niftiinfo(mrNii);
+            mrCtr = [(info.ImageSize(1:3) + 1) / 2, 1] * info.Transform.T;   % 1-based centre
+            mrCtr = mrCtr(1:3);
+            W_mr = []; mrName = '';
+            ids = keys(nodes);
+            for k = 1:numel(ids)
+                n = nodes(ids{k});
+                if ~endsWith(n.tag, 'Volume') || ~isKey(n.refs, 'storage'), continue; end
+                f = electrodeLocalizer.mrmlStorageFile(nodes, n, sceneDir);
+                if isempty(f) || ~endsWith(lower(f), '.nrrd'), continue; end
+                ctr = electrodeLocalizer.nrrdCentreRAS(f);
+                if isempty(ctr) || norm(ctr - mrCtr) > 3, continue; end
+                W = electrodeLocalizer.mrmlToWorld(nodes, n);
+                if isempty(W_mr)
+                    W_mr = W;  mrName = n.name;
+                elseif max(abs(W(:) - W_mr(:))) > 1e-3
+                    error(['[readSlicerScene] Volumes "%s" and "%s" both match %s ' ...
+                           'but sit under different transforms.'], mrName, n.name, mrNii);
+                end
+            end
+            assert(~isempty(W_mr), ['[readSlicerScene] No volume in the scene matches %s ' ...
+                '(centre %s). Contacts cannot be mapped into this subject''s MR space.'], ...
+                mrNii, mat2str(round(mrCtr, 1)));
+            fprintf('[readSlicerScene] Subject MR in scene: "%s"\n', mrName);
+
+            % ---- Collect contacts from curve markups ----
+            chanName = {}; elec = {}; contact = []; xyz = zeros(0, 3);
+            for k = 1:numel(ids)
+                n = nodes(ids{k});
+                if ~strcmp(n.tag, 'MarkupsCurve'), continue; end
+                f = electrodeLocalizer.mrmlStorageFile(nodes, n, sceneDir);
+                if isempty(f), continue; end
+                J = jsondecode(fileread(f));
+                mk = J.markups(1);
+                if iscell(mk), mk = mk{1}; end
+                if isempty(mk.controlPoints), continue; end
+                cps = mk.controlPoints;
+                if iscell(cps), cps = [cps{:}]; end
+                isLPS = ~isfield(mk, 'coordinateSystem') || strcmpi(mk.coordinateSystem, 'LPS');
+                M = electrodeLocalizer.mrmlToWorld(nodes, n);
+                M = W_mr \ M;                                   % curve-local -> MR RAS
+                for c = 1:numel(cps)
+                    tok = regexp(cps(c).label, ['^(?:' regexptranslate('escape', n.name) ')?[-_ ]?(\d+)$'], 'tokens', 'once');
+                    if isempty(tok), continue; end              % e.g. ROSA entry/target 'E','T'
+                    if isfield(cps(c), 'positionStatus') && ~strcmp(cps(c).positionStatus, 'defined'), continue; end
+                    p = cps(c).position(:)';
+                    if isLPS, p(1:2) = -p(1:2); end
+                    q = M * [p, 1]';
+                    chanName{end+1, 1} = sprintf('%s%s', n.name, tok{1}); %#ok<AGROW>
+                    elec{end+1, 1}     = n.name;                          %#ok<AGROW>
+                    contact(end+1, 1)  = str2double(tok{1});              %#ok<AGROW>
+                    xyz(end+1, :)      = q(1:3)';                         %#ok<AGROW>
+                end
+            end
+            assert(~isempty(chanName), '[readSlicerScene] No numbered curve contacts found in %s', mrbPath);
+
+            T = table(chanName, xyz(:,1), xyz(:,2), xyz(:,3), elec, contact, ...
+                'VariableNames', {'chanName','x','y','z','electrode','contact'});
+            T = sortrows(T, {'electrode','contact'});
+            [~, ia] = unique(T.chanName, 'stable');
+            if numel(ia) < height(T)
+                warning('[readSlicerScene] Duplicate contact names: %s', ...
+                    strjoin(unique(T.chanName(setdiff(1:height(T), ia))), ', '));
+            end
+            fprintf('[readSlicerScene] %d contacts on %d electrodes.\n', ...
+                height(T), numel(unique(T.electrode)));
+        end
+
+    end
+
     methods (Static, Access = private)
+
+        function nodes = parseMrml(mrmlPath)
+            % Parse an MRML scene into a map id -> struct(tag, name, refs,
+            % attrs), where refs maps role -> referenced node id.
+            nodes = containers.Map();
+            doc = xmlread(mrmlPath);
+            els = doc.getDocumentElement.getChildNodes;
+            for i = 0:els.getLength-1
+                el = els.item(i);
+                if el.getNodeType ~= el.ELEMENT_NODE || ~el.hasAttribute('id'), continue; end
+                a = el.getAttributes;
+                attrs = struct();
+                for j = 0:a.getLength-1
+                    key = matlab.lang.makeValidName(char(a.item(j).getName));
+                    attrs.(key) = char(a.item(j).getValue);
+                end
+                refs = containers.Map();
+                if isfield(attrs, 'references')
+                    for r = strsplit(attrs.references, ';')
+                        kv = strsplit(r{1}, ':');
+                        if numel(kv) == 2 && ~isempty(kv{2})
+                            refs(kv{1}) = strtok(kv{2});        % first id if several
+                        end
+                    end
+                end
+                if isfield(attrs, 'transformNodeRef') && ~isKey(refs, 'transform')
+                    refs('transform') = attrs.transformNodeRef;
+                end
+                name = '';
+                if isfield(attrs, 'name'), name = attrs.name; end
+                nodes(attrs.id) = struct('tag', char(el.getNodeName), 'name', name, ...
+                    'refs', refs, 'attrs', attrs);
+            end
+        end
+
+        function W = mrmlToWorld(nodes, n)
+            % Compose the node's parent linear transforms into one RAS 4x4
+            % mapping node-local coordinates to scene world.
+            W = eye(4);
+            while isKey(n.refs, 'transform') && isKey(nodes, n.refs('transform'))
+                n = nodes(n.refs('transform'));
+                if isfield(n.attrs, 'matrixTransformToParent')
+                    P = reshape(sscanf(n.attrs.matrixTransformToParent, '%f'), 4, 4)';
+                elseif isfield(n.attrs, 'matrixTransformFromParent')
+                    P = inv(reshape(sscanf(n.attrs.matrixTransformFromParent, '%f'), 4, 4)');
+                else
+                    error('[readSlicerScene] Transform "%s" is not linear; only linear transforms are supported.', n.name);
+                end
+                W = P * W;
+            end
+        end
+
+        function f = mrmlStorageFile(nodes, n, sceneDir)
+            % Absolute path of a node's storage file, or '' if none.
+            f = '';
+            if ~isKey(n.refs, 'storage') || ~isKey(nodes, n.refs('storage')), return; end
+            s = nodes(n.refs('storage'));
+            if ~isfield(s.attrs, 'fileName'), return; end
+            f = fullfile(sceneDir, s.attrs.fileName);
+            if exist(f, 'file') ~= 2, f = ''; end
+        end
+
+        function ctr = nrrdCentreRAS(nrrdPath)
+            % Centre of a 3-D NRRD volume in RAS mm, from its text header.
+            ctr = [];
+            fid = fopen(nrrdPath, 'r');
+            hdr = fread(fid, 8192, '*char')';
+            fclose(fid);
+            hdr = regexprep(hdr, '\r', '');
+            fld = @(key) regexp(hdr, ['^' key ':[ \t]*([^\n]*)$'], 'tokens', 'once', 'lineanchors');
+            sz  = fld('sizes');  sd = fld('space directions');  so = fld('space origin');  sp = fld('space');
+            if isempty(sz) || isempty(sd) || isempty(so), return; end
+            sz = sscanf(sz{1}, '%f')';
+            D  = reshape(str2double(regexp(sd{1}, '-?[\d.eE+-]+', 'match')), 3, [])';  % rows = axes
+            o  = str2double(regexp(so{1}, '-?[\d.eE+-]+', 'match'));
+            if numel(sz) ~= 3 || ~isequal(size(D), [3 3]), return; end
+            ctr = o + ((sz - 1) / 2) * D;
+            if ~isempty(sp) && any(strcmpi(strtrim(sp{1}), {'left-posterior-superior', 'LPS'}))
+                ctr(1:2) = -ctr(1:2);
+            end
+        end
 
         function p = defaultFsBin()
             % Locate the FreeSurfer bin directory by checking, in order:
@@ -3052,7 +3401,7 @@ classdef electrodeLocalizer < handle
                         electrodeLocalizer.validateGifti(src, names{k});
                     end
                 catch e
-                    warndlg(e.message, sprintf('Validation failed — %s', names{k}));
+                    dlgNonModal(e.message, sprintf('Validation failed — %s', names{k}), 'OK');
                     return;
                 end
                 if ~exist(talDir,  'dir'), mkdir(talDir);  end
@@ -3805,7 +4154,7 @@ classdef electrodeLocalizer < handle
                         % Auto-number when no channel list provided
                         name = sprintf('Point %d', numel(markersOut)+1);
                     else
-                        msgbox('Enter a channel name or select from the list.','','warn');
+                        dlgNonModal('Enter a channel name or select from the list.', 'Channel name needed', 'OK');
                         return;
                     end
                 end
@@ -3844,15 +4193,15 @@ classdef electrodeLocalizer < handle
 
             function cbDone(~,~)
                 if numel(markersOut) == 0
-                    choice = questdlg('No markers placed. Exit anyway?', ...
-                        'No Markers','Exit','Cancel','Cancel');
+                    choice = dlgNonModal('No markers placed. Exit anyway?', ...
+                        'No markers', 'Cancel', 'Exit');
                     if ~strcmp(choice,'Exit'), return; end
                 end
                 delete(fig);
             end
             function cbQuit(~,~)
-                choice = questdlg('Quit? All placed markers will be discarded.', ...
-                    'Quit','Quit','Cancel','Cancel');
+                choice = dlgNonModal('Quit? All placed markers will be discarded.', ...
+                    'Quit', 'Cancel', 'Quit');
                 if ~strcmp(choice,'Quit'), return; end
                 markersOut = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
                 delete(fig);
