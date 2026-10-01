@@ -1,6 +1,7 @@
 *.asv
 .DS_Store
 .claude/
+/Claude outputs/
 Utilities/viewMRI.m
 /figures
 /Laura Code
