@@ -190,11 +190,8 @@ classdef electrodeLocalizer < handle
             if ~forceNew && self.isComplete(), return; end
 
             % Show setup dialog.  Imports are handled inline; dialog only
-            % closes when the user clicks Create, Import Slicer or Cancel.
-            % A Slicer scene under <subj>/Slicer*/ makes Slicer import the
-            % default action.
-            mrbPath = self.findSlicerScene();
-            dlg = self.localizationSetupDialog(forceNew, mrbPath);
+            % closes when the user clicks Create or Cancel.
+            dlg = self.localizationSetupDialog(forceNew);
             if strcmp(dlg.action, 'cancel')
                 error('electrodeLocalizer:cancelled', ...
                     '[electrodeLocalizer] Setup cancelled by user.');
@@ -207,21 +204,11 @@ classdef electrodeLocalizer < handle
             leadsFile  = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
             leadsReady = ~forceNew && exist(leadsFile, 'file') == 2;
 
-            % Slicer path: contacts (and their CT registration) come from
-            % the scene, so only the MR and surfaces are needed.
-            if strcmp(dlg.action, 'slicer')
-                self.checkPrerequisites('errorIfMissing', true);
-                self.getInputFiles('ct', false);
-                self.runSurface();
-                self.runSuma();
-                self.importSlicerScene(mrbPath, 'overwrite', true);
-                return;
-            end
-
-            % Acquire MRI/CT before surface stages — recon-all needs mr_pre.nii.
+            % Acquire the MRI before surface stages — recon-all needs
+            % mr_pre.nii.  The CT is acquired later, only if needed.
             if ~leadsReady
                 self.checkPrerequisites('errorIfMissing', true);
-                self.getInputFiles();
+                self.getInputFiles('ct', false);
             end
 
             % Surface stages self-check; always attempt so SUMA gets run
@@ -231,6 +218,29 @@ classdef electrodeLocalizer < handle
 
             % CT pipeline and electrode naming only needed if leads.csv absent.
             if ~leadsReady
+                % A Slicer scene under <subj>/Slicer*/ already holds
+                % registered, named contacts: offer importing it (default)
+                % instead of registering and localizing from scratch.
+                mrbPath = self.findSlicerScene();
+                if ~isempty(mrbPath)
+                    [~, mrbName, mrbExt] = fileparts(mrbPath);
+                    choice = dlgNonModal({ ...
+                        sprintf('A 3D Slicer scene was found for %s:', self.subj), ...
+                        ['  ' mrbName mrbExt], '', ...
+                        'Import Slicer: take electrode contacts from the scene (its own CT registration).', ...
+                        'Fresh localization: run CT registration and electrode localization here.'}, ...
+                        'Electrode localization', 'Import Slicer', 'Fresh localization');
+                    if isempty(choice)
+                        error('electrodeLocalizer:cancelled', ...
+                            '[electrodeLocalizer] Localization cancelled by user.');
+                    end
+                    if strcmp(choice, 'Import Slicer')
+                        self.importSlicerScene(mrbPath, 'overwrite', true);
+                        return;
+                    end
+                end
+
+                self.getInputFiles();          % MR already present; acquires CT
                 self.coregisterCT('forceNew', forceNew);
                 if isempty(self.chanNames)
                     self.chanNames = sourceLocalizer.loadChanNamesFromFile();
@@ -3170,7 +3180,7 @@ classdef electrodeLocalizer < handle
 
     methods (Access = private)
 
-        function dlg = localizationSetupDialog(self, forceNew, mrbPath)
+        function dlg = localizationSetupDialog(self, forceNew)
             % Dark-themed modal dialog shown when required localization files
             % are missing, or when forceNew=true.  A listbox shows all 7
             % files with OK/blank status; selecting a row updates the
@@ -3178,13 +3188,8 @@ classdef electrodeLocalizer < handle
             % copies an existing file into place (always allowed, even if
             % the file is already present).
             %
-            % If mrbPath (a Slicer scene) is given, an Import Slicer button
-            % is shown as the default action.
-            %
-            % Returns struct with .action: 'create' | 'slicer' | 'cancel'
+            % Returns struct with .action: 'create' | 'import' | 'cancel'
             if nargin < 2, forceNew = false; end
-            if nargin < 3, mrbPath = ''; end
-            hasSlicer = ~isempty(mrbPath);
 
             % ---- file list -----------------------------------------------
             talDir  = fullfile(self.rootFolder, self.subj, 'tal');
@@ -3295,10 +3300,6 @@ classdef electrodeLocalizer < handle
                 hdrTitle = sprintf('Localization files not found for  %s', self.subj);
                 hdrSub   = 'Select a row to see details.  Create runs the full pipeline.  Import copies existing files.';
             end
-            if hasSlicer
-                [~, mrbName, mrbExt] = fileparts(mrbPath);
-                hdrSub = sprintf('Slicer scene found (%s%s).  Import Slicer takes contacts from it (recommended).', mrbName, mrbExt);
-            end
             uicontrol(fig, 'Style','text', ...
                 'String', hdrTitle, ...
                 'ForegroundColor', FG, 'BackgroundColor', BG, ...
@@ -3335,37 +3336,19 @@ classdef electrodeLocalizer < handle
                 'Callback', @(src,~) set(hDesc, 'String', descs{get(src,'Value')})); %#ok<NASGU>
 
             % ---- action buttons ------------------------------------------
-            % With a Slicer scene: [Import Slicer] [Create] [Import] ... [Cancel],
-            % Import Slicer highlighted as the default.
-            bH = 34;  GREEN = [0.18 0.42 0.18];
-            if hasSlicer
-                bW = 120;  x0 = PAD + bW + PAD;
-                hDefault = uicontrol(fig, 'Style','pushbutton', ...
-                    'String', 'Import Slicer', ...
-                    'ForegroundColor', FG, 'BackgroundColor', GREEN, ...
-                    'FontSize', 11, 'FontWeight', 'bold', ...
-                    'TooltipString', mrbPath, ...
-                    'Position', [PAD btnY bW bH], ...
-                    'Callback', @cbSlicer);
-                createBG = BTN;  createWt = 'normal';
-            else
-                bW = 130;  x0 = PAD;
-                createBG = GREEN;  createWt = 'bold';
-            end
-            hCreate = uicontrol(fig, 'Style','pushbutton', ...
+            bW = 130; bH = 34;
+            uicontrol(fig, 'Style','pushbutton', ...
                 'String', 'Create', ...
-                'ForegroundColor', FG, 'BackgroundColor', createBG, ...
-                'FontSize', 11, 'FontWeight', createWt, ...
-                'Position', [x0 btnY bW bH], ...
+                'ForegroundColor', FG, 'BackgroundColor', [0.18 0.42 0.18], ...
+                'FontSize', 11, 'FontWeight', 'bold', ...
+                'Position', [PAD btnY bW bH], ...
                 'Callback', @cbCreate);
             uicontrol(fig, 'Style','pushbutton', ...
                 'String', 'Import', ...
                 'ForegroundColor', FG, 'BackgroundColor', BTN, ...
                 'FontSize', 11, ...
-                'Position', [x0 + bW + PAD btnY bW bH], ...
+                'Position', [PAD + bW + PAD btnY bW bH], ...
                 'Callback', @cbImport);
-            if ~hasSlicer, hDefault = hCreate; end
-            uicontrol(hDefault);   % keyboard focus on the default action
             uicontrol(fig, 'Style','pushbutton', ...
                 'String', 'Cancel', ...
                 'ForegroundColor', DIM, 'BackgroundColor', BTN, ...
@@ -3385,11 +3368,6 @@ classdef electrodeLocalizer < handle
 
             function cbCreate(~,~)
                 setappdata(0, 'eloc_dlg_result', struct('action','create'));
-                delete(fig);
-            end
-
-            function cbSlicer(~,~)
-                setappdata(0, 'eloc_dlg_result', struct('action','slicer'));
                 delete(fig);
             end
 
