@@ -204,6 +204,12 @@ classdef electrodeLocalizer < handle
             leadsFile  = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
             leadsReady = ~forceNew && exist(leadsFile, 'file') == 2;
 
+            % Acquire MRI/CT before surface stages — recon-all needs mr_pre.nii.
+            if ~leadsReady
+                self.checkPrerequisites('errorIfMissing', true);
+                self.getInputFiles();
+            end
+
             % Surface stages self-check; always attempt so SUMA gets run
             % when FreeSurfer is done but AFNI hasn't been run yet.
             self.runSurface();           % never force — recon-all takes hours
@@ -211,8 +217,6 @@ classdef electrodeLocalizer < handle
 
             % CT pipeline and electrode naming only needed if leads.csv absent.
             if ~leadsReady
-                self.checkPrerequisites('errorIfMissing', true);
-                self.getInputFiles();
                 self.coregisterCT('forceNew', forceNew);
                 if isempty(self.chanNames)
                     self.chanNames = sourceLocalizer.loadChanNamesFromFile();
