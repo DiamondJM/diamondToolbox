@@ -1475,7 +1475,7 @@ classdef electrodeLocalizer < handle
             function cbConfirm(~,~)
                 name = resolvedName();
                 if isempty(name)
-                    msgbox('Enter a channel name or use Mark as Artifact.','','warn');
+                    dlgNonModal('Enter a channel name or use Mark as Artifact.', 'Channel name needed', 'OK');
                     return;
                 end
                 typeStrs    = get(hType,'String');
@@ -1520,8 +1520,8 @@ classdef electrodeLocalizer < handle
             end
 
             function cbQuit(~,~)
-                choice = questdlg('Quit naming? All assignments will be discarded.', ...
-                    'Quit','Quit','Cancel','Cancel');
+                choice = dlgNonModal('Quit naming? All assignments will be discarded.', ...
+                    'Quit naming', 'Cancel', 'Quit');
                 if ~strcmp(choice,'Quit'), return; end
                 userQuit = true;
                 delete(fig);
@@ -3392,7 +3392,7 @@ classdef electrodeLocalizer < handle
                         electrodeLocalizer.validateGifti(src, names{k});
                     end
                 catch e
-                    warndlg(e.message, sprintf('Validation failed — %s', names{k}));
+                    dlgNonModal(e.message, sprintf('Validation failed — %s', names{k}), 'OK');
                     return;
                 end
                 if ~exist(talDir,  'dir'), mkdir(talDir);  end
@@ -4137,7 +4137,7 @@ classdef electrodeLocalizer < handle
                         % Auto-number when no channel list provided
                         name = sprintf('Point %d', numel(markersOut)+1);
                     else
-                        msgbox('Enter a channel name or select from the list.','','warn');
+                        dlgNonModal('Enter a channel name or select from the list.', 'Channel name needed', 'OK');
                         return;
                     end
                 end
@@ -4176,15 +4176,15 @@ classdef electrodeLocalizer < handle
 
             function cbDone(~,~)
                 if numel(markersOut) == 0
-                    choice = questdlg('No markers placed. Exit anyway?', ...
-                        'No Markers','Exit','Cancel','Cancel');
+                    choice = dlgNonModal('No markers placed. Exit anyway?', ...
+                        'No markers', 'Cancel', 'Exit');
                     if ~strcmp(choice,'Exit'), return; end
                 end
                 delete(fig);
             end
             function cbQuit(~,~)
-                choice = questdlg('Quit? All placed markers will be discarded.', ...
-                    'Quit','Quit','Cancel','Cancel');
+                choice = dlgNonModal('Quit? All placed markers will be discarded.', ...
+                    'Quit', 'Cancel', 'Quit');
                 if ~strcmp(choice,'Quit'), return; end
                 markersOut = struct('chanName',{},'type',{},'x',{},'y',{},'z',{});
                 delete(fig);
