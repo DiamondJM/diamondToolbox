@@ -498,6 +498,18 @@ classdef electrodeLocalizer < handle
             else
                 fprintf('[Stage 2] CT already present: %s\n', ctDest);
             end
+
+            % Reorient CT to RAI so voxel axes are R/L, A/P, S/I.  Some CTs
+            % (e.g. coronal reformats, LSP) store dims in a different order;
+            % the slicer and ctRasToFS both assume an axis-aligned RAI volume.
+            % Also fix the Stage 5 work copy: align.sh registers an RAI
+            % reorientation (ct_implant+orig), so reorienting the .nii makes
+            % it match the existing transform rather than invalidating it.
+            self.reorientToRAI(ctDest);
+            ctWork = fullfile(self.locDirs.ct_1_xfm, 'ct_implant.nii');
+            if exist(ctWork, 'file') == 2
+                self.reorientToRAI(ctWork);
+            end
         end
 
         % -----------------------------------------------------------------
@@ -1480,6 +1492,10 @@ classdef electrodeLocalizer < handle
                     % ---- Step 2: CT NIfTI voxel → CT BRIK voxel (RAI) ----
                     % Flip each axis where NIfTI and BRIK directions are opposite.
                     % For LPS NIfTI (Txfm diagonal: neg, neg, pos): all 3 axes flip.
+                    [~, ctAx] = max(abs(Txfm(1:3,1:3)), [], 2);
+                    assert(isequal(ctAx(:)', [1 2 3]), ...
+                        ['[manualLocalize] CT voxel axes are not R/L, A/P, S/I ordered: %s\n' ...
+                         'Reorient ct_implant.nii to RAI and re-run coregisterCT.'], ctFile);
                     ct_bvox = vox_0;
                     if Txfm(1,1) < 0, ct_bvox(:,1) = (nx-1) - ct_bvox(:,1); end
                     if Txfm(2,2) < 0, ct_bvox(:,2) = (ny-1) - ct_bvox(:,2); end
@@ -2028,6 +2044,26 @@ classdef electrodeLocalizer < handle
     end % methods
 
     methods (Access = private)
+
+        function reorientToRAI(self, niiFile)
+            % Reorient a NIfTI in place to AFNI RAI (NIfTI LPS) with
+            % 3dresample.  Pure axis permute/flip, no interpolation.
+            % No-op if the volume is already RAI.
+            T = niftiinfo(niiFile).Transform.T;    % row-vector: mm = [i j k 1] * T
+            [~, ax] = max(abs(T(1:3,1:3)), [], 2);
+            if isequal(ax(:)', [1 2 3]) && T(1,1) < 0 && T(2,2) < 0 && T(3,3) > 0
+                return;
+            end
+            fprintf('[Stage 2] Reorienting to RAI: %s\n', niiFile);
+            tmpFile = [niiFile(1:end-4) '_rai_tmp.nii'];
+            cmd = sprintf('"%s" -orient RAI -inset "%s" -prefix "%s" -overwrite', ...
+                fullfile(self.afniBin, '3dresample'), niiFile, tmpFile);
+            [st, out] = unix(cmd);
+            if st ~= 0 || exist(tmpFile, 'file') ~= 2
+                error('[electrodeLocalizer] 3dresample failed reorienting %s:\n%s', niiFile, out);
+            end
+            movefile(tmpFile, niiFile);
+        end
 
         function convertToNii(self, srcFile, destFile)
             % Convert an imaging file to uncompressed NIfTI at destFile.
