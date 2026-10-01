@@ -322,6 +322,63 @@ classdef electrodeLocalizer < handle
         end
 
         % -----------------------------------------------------------------
+        %% Import contacts from a 3D Slicer scene (.mrb)
+        % -----------------------------------------------------------------
+
+        function T = importSlicerScene(self, mrbPath, varargin)
+            % Write tal/leads.csv from electrode contacts placed in a 3D
+            % Slicer scene, converted into this subject's MR scanner RAS
+            % (the space of the FreeSurfer/SUMA surfaces).
+            %
+            % Usage:
+            %   el.importSlicerScene()                      % file dialog
+            %   el.importSlicerScene('/path/Scene.mrb')
+            %   el.importSlicerScene(mrbPath, 'overwrite', true)
+            %
+            % Contacts are read from the scene's curve markups (one curve
+            % per electrode, numeric control-point labels); names are
+            % curve name + label, e.g. LANT + 1 -> LANT1.  The scene's
+            % world space is usually a planning space (e.g. ROSA), not
+            % scanner RAS, so contacts are mapped through the transform
+            % the subject's MR sits under in the scene.  That MR is found
+            % by matching scene volumes against mr_pre.nii; the import
+            % errors if no scene volume matches.
+            %
+            % Optional name-value:
+            %   overwrite - replace an existing leads.csv (default false)
+            %   type      - contact type for all imported contacts
+            %               (default 'depth'; 'subdural' gets projected)
+
+            ip = inputParser;
+            ip.addParameter('overwrite', false);
+            ip.addParameter('type',      'depth');
+            ip.parse(varargin{:});
+
+            leadsFile = fullfile(self.rootFolder, self.subj, 'tal', 'leads.csv');
+            assert(ip.Results.overwrite || exist(leadsFile, 'file') ~= 2, ...
+                '[importSlicerScene] leads.csv already exists: %s\nPass ''overwrite'', true to replace it.', leadsFile);
+
+            if nargin < 2 || isempty(mrbPath)
+                [f, d] = uigetfile('*.mrb', 'Select Slicer scene (.mrb)');
+                if isequal(f, 0), T = []; return; end
+                mrbPath = fullfile(d, f);
+            end
+
+            mrNii = fullfile(self.locDirs.mr_pre, 'mr_pre.nii');
+            T = electrodeLocalizer.readSlicerScene(mrbPath, mrNii);
+
+            T.type = repmat({ip.Results.type}, height(T), 1);
+            self.leads = T(:, {'chanName','type','x','y','z'});
+            if any(strcmp(self.leads.type, 'subdural'))
+                self.projectElectrodes();
+            end
+            self.writeLeads();
+            if ~isempty(self.chanNames)
+                electrodeLocalizer.validateLeadsCSV(leadsFile, self.chanNames);
+            end
+        end
+
+        % -----------------------------------------------------------------
         %% Prerequisites check
         % -----------------------------------------------------------------
 
@@ -2642,7 +2699,181 @@ classdef electrodeLocalizer < handle
 
     end % methods (Access = private)
 
+    methods (Static)
+
+        function T = readSlicerScene(mrbPath, mrNii)
+            % Read electrode contacts from a 3D Slicer scene bundle (.mrb)
+            % and return them in mrNii's scanner RAS as a table with
+            % columns chanName, x, y, z, electrode, contact.
+            %
+            % Coordinate chain, all in RAS 4x4 (MRML matrixTransformToParent):
+            %   contact (curve-local) --W_curve--> scene world
+            %   scene world --inv(W_mr)--> MR local = mrNii scanner RAS
+            % where W_mr is the transform chain of the scene volume whose
+            % geometry matches mrNii (same centre within 3 mm).
+
+            assert(exist(mrbPath, 'file') == 2, '[readSlicerScene] Not found: %s', mrbPath);
+            tmpDir = tempname;
+            unzip(mrbPath, tmpDir);
+            cleanup = onCleanup(@() rmdir(tmpDir, 's'));
+            mrmlFile = dir(fullfile(tmpDir, '**', '*.mrml'));
+            assert(~isempty(mrmlFile), '[readSlicerScene] No .mrml scene file in %s', mrbPath);
+            sceneDir = mrmlFile(1).folder;
+            nodes = electrodeLocalizer.parseMrml(fullfile(sceneDir, mrmlFile(1).name));
+
+            % ---- Find the scene volume that is this subject's MR ----
+            info = niftiinfo(mrNii);
+            mrCtr = [(info.ImageSize(1:3) + 1) / 2, 1] * info.Transform.T;   % 1-based centre
+            mrCtr = mrCtr(1:3);
+            W_mr = []; mrName = '';
+            ids = keys(nodes);
+            for k = 1:numel(ids)
+                n = nodes(ids{k});
+                if ~endsWith(n.tag, 'Volume') || ~isKey(n.refs, 'storage'), continue; end
+                f = electrodeLocalizer.mrmlStorageFile(nodes, n, sceneDir);
+                if isempty(f) || ~endsWith(lower(f), '.nrrd'), continue; end
+                ctr = electrodeLocalizer.nrrdCentreRAS(f);
+                if isempty(ctr) || norm(ctr - mrCtr) > 3, continue; end
+                W = electrodeLocalizer.mrmlToWorld(nodes, n);
+                if isempty(W_mr)
+                    W_mr = W;  mrName = n.name;
+                elseif max(abs(W(:) - W_mr(:))) > 1e-3
+                    error(['[readSlicerScene] Volumes "%s" and "%s" both match %s ' ...
+                           'but sit under different transforms.'], mrName, n.name, mrNii);
+                end
+            end
+            assert(~isempty(W_mr), ['[readSlicerScene] No volume in the scene matches %s ' ...
+                '(centre %s). Contacts cannot be mapped into this subject''s MR space.'], ...
+                mrNii, mat2str(round(mrCtr, 1)));
+            fprintf('[readSlicerScene] Subject MR in scene: "%s"\n', mrName);
+
+            % ---- Collect contacts from curve markups ----
+            chanName = {}; elec = {}; contact = []; xyz = zeros(0, 3);
+            for k = 1:numel(ids)
+                n = nodes(ids{k});
+                if ~strcmp(n.tag, 'MarkupsCurve'), continue; end
+                f = electrodeLocalizer.mrmlStorageFile(nodes, n, sceneDir);
+                if isempty(f), continue; end
+                J = jsondecode(fileread(f));
+                mk = J.markups(1);
+                if iscell(mk), mk = mk{1}; end
+                if isempty(mk.controlPoints), continue; end
+                cps = mk.controlPoints;
+                if iscell(cps), cps = [cps{:}]; end
+                isLPS = ~isfield(mk, 'coordinateSystem') || strcmpi(mk.coordinateSystem, 'LPS');
+                M = electrodeLocalizer.mrmlToWorld(nodes, n);
+                M = W_mr \ M;                                   % curve-local -> MR RAS
+                for c = 1:numel(cps)
+                    tok = regexp(cps(c).label, ['^(?:' regexptranslate('escape', n.name) ')?[-_ ]?(\d+)$'], 'tokens', 'once');
+                    if isempty(tok), continue; end              % e.g. ROSA entry/target 'E','T'
+                    if isfield(cps(c), 'positionStatus') && ~strcmp(cps(c).positionStatus, 'defined'), continue; end
+                    p = cps(c).position(:)';
+                    if isLPS, p(1:2) = -p(1:2); end
+                    q = M * [p, 1]';
+                    chanName{end+1, 1} = sprintf('%s%s', n.name, tok{1}); %#ok<AGROW>
+                    elec{end+1, 1}     = n.name;                          %#ok<AGROW>
+                    contact(end+1, 1)  = str2double(tok{1});              %#ok<AGROW>
+                    xyz(end+1, :)      = q(1:3)';                         %#ok<AGROW>
+                end
+            end
+            assert(~isempty(chanName), '[readSlicerScene] No numbered curve contacts found in %s', mrbPath);
+
+            T = table(chanName, xyz(:,1), xyz(:,2), xyz(:,3), elec, contact, ...
+                'VariableNames', {'chanName','x','y','z','electrode','contact'});
+            T = sortrows(T, {'electrode','contact'});
+            [~, ia] = unique(T.chanName, 'stable');
+            if numel(ia) < height(T)
+                warning('[readSlicerScene] Duplicate contact names: %s', ...
+                    strjoin(unique(T.chanName(setdiff(1:height(T), ia))), ', '));
+            end
+            fprintf('[readSlicerScene] %d contacts on %d electrodes.\n', ...
+                height(T), numel(unique(T.electrode)));
+        end
+
+    end
+
     methods (Static, Access = private)
+
+        function nodes = parseMrml(mrmlPath)
+            % Parse an MRML scene into a map id -> struct(tag, name, refs,
+            % attrs), where refs maps role -> referenced node id.
+            nodes = containers.Map();
+            doc = xmlread(mrmlPath);
+            els = doc.getDocumentElement.getChildNodes;
+            for i = 0:els.getLength-1
+                el = els.item(i);
+                if el.getNodeType ~= el.ELEMENT_NODE || ~el.hasAttribute('id'), continue; end
+                a = el.getAttributes;
+                attrs = struct();
+                for j = 0:a.getLength-1
+                    key = matlab.lang.makeValidName(char(a.item(j).getName));
+                    attrs.(key) = char(a.item(j).getValue);
+                end
+                refs = containers.Map();
+                if isfield(attrs, 'references')
+                    for r = strsplit(attrs.references, ';')
+                        kv = strsplit(r{1}, ':');
+                        if numel(kv) == 2 && ~isempty(kv{2})
+                            refs(kv{1}) = strtok(kv{2});        % first id if several
+                        end
+                    end
+                end
+                if isfield(attrs, 'transformNodeRef') && ~isKey(refs, 'transform')
+                    refs('transform') = attrs.transformNodeRef;
+                end
+                name = '';
+                if isfield(attrs, 'name'), name = attrs.name; end
+                nodes(attrs.id) = struct('tag', char(el.getNodeName), 'name', name, ...
+                    'refs', refs, 'attrs', attrs);
+            end
+        end
+
+        function W = mrmlToWorld(nodes, n)
+            % Compose the node's parent linear transforms into one RAS 4x4
+            % mapping node-local coordinates to scene world.
+            W = eye(4);
+            while isKey(n.refs, 'transform') && isKey(nodes, n.refs('transform'))
+                n = nodes(n.refs('transform'));
+                if isfield(n.attrs, 'matrixTransformToParent')
+                    P = reshape(sscanf(n.attrs.matrixTransformToParent, '%f'), 4, 4)';
+                elseif isfield(n.attrs, 'matrixTransformFromParent')
+                    P = inv(reshape(sscanf(n.attrs.matrixTransformFromParent, '%f'), 4, 4)');
+                else
+                    error('[readSlicerScene] Transform "%s" is not linear; only linear transforms are supported.', n.name);
+                end
+                W = P * W;
+            end
+        end
+
+        function f = mrmlStorageFile(nodes, n, sceneDir)
+            % Absolute path of a node's storage file, or '' if none.
+            f = '';
+            if ~isKey(n.refs, 'storage') || ~isKey(nodes, n.refs('storage')), return; end
+            s = nodes(n.refs('storage'));
+            if ~isfield(s.attrs, 'fileName'), return; end
+            f = fullfile(sceneDir, s.attrs.fileName);
+            if exist(f, 'file') ~= 2, f = ''; end
+        end
+
+        function ctr = nrrdCentreRAS(nrrdPath)
+            % Centre of a 3-D NRRD volume in RAS mm, from its text header.
+            ctr = [];
+            fid = fopen(nrrdPath, 'r');
+            hdr = fread(fid, 8192, '*char')';
+            fclose(fid);
+            hdr = regexprep(hdr, '\r', '');
+            fld = @(key) regexp(hdr, ['^' key ':[ \t]*([^\n]*)$'], 'tokens', 'once', 'lineanchors');
+            sz  = fld('sizes');  sd = fld('space directions');  so = fld('space origin');  sp = fld('space');
+            if isempty(sz) || isempty(sd) || isempty(so), return; end
+            sz = sscanf(sz{1}, '%f')';
+            D  = reshape(str2double(regexp(sd{1}, '-?[\d.eE+-]+', 'match')), 3, [])';  % rows = axes
+            o  = str2double(regexp(so{1}, '-?[\d.eE+-]+', 'match'));
+            if numel(sz) ~= 3 || ~isequal(size(D), [3 3]), return; end
+            ctr = o + ((sz - 1) / 2) * D;
+            if ~isempty(sp) && any(strcmpi(strtrim(sp{1}), {'left-posterior-superior', 'LPS'}))
+                ctr(1:2) = -ctr(1:2);
+            end
+        end
 
         function p = defaultFsBin()
             % Locate the FreeSurfer bin directory by checking, in order:
