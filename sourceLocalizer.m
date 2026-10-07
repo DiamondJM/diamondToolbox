@@ -9,8 +9,6 @@ classdef sourceLocalizer < handle
 
         electrodeLocalizer
 
-        braindata = struct('myBd',[],'myBp',[]);
-
         spikeDetectionResults = struct('rasters',[],'waveforms',[],'paramStruct',struct())
         seqResults = struct('seriesAll',[],'timesAll',[],'startEndTime',[]);
         sensors
@@ -35,6 +33,11 @@ classdef sourceLocalizer < handle
     properties (Transient = true)
 
         geodesic
+
+        % Not saved: braindata2/brainplotter live in toolbox subfolders,
+        % which load() can't resolve before any sourceLocalizer code runs.
+        % retrieveBraindata reloads them from brainData_<subj>.mat on demand.
+        braindata = struct('myBd',[],'myBp',[]);
 
     end
 
@@ -75,7 +78,7 @@ classdef sourceLocalizer < handle
             %       sl.loadTimeSeries()
             %   Then call sl.localizationManager().
 
-            removeClaudeWorktreesFromPath();
+            sourceLocalizer.addToolboxToPath();
 
             p = inputParser;
             addParameter(p, 'chanNames',                  {});
@@ -83,9 +86,6 @@ classdef sourceLocalizer < handle
             parse(p, varargin{:});
             forceNewElectrodeLocalizer = p.Results.forceNewElectrodeLocalizer;
             chanNames                  = p.Results.chanNames;
-
-            toolboxRoot = fileparts(mfilename('fullpath'));
-            addpath(genpath(toolboxRoot));
 
             self.subj       = subj;
             self.rootFolder = rootFolder;
@@ -108,16 +108,23 @@ classdef sourceLocalizer < handle
 
         %% Time series loading
 
-        function loadTimeSeries(self)
+        function loadTimeSeries(self, varargin)
             % Load a time series file via dialog and assign self.timeSeries,
             % self.Fs, and (when appropriate) self.chanNames.
+            %
+            % Optional name-value:
+            %   removeLineNoise - If true, apply a zero-phase notch filter at
+            %       the line frequency and its harmonics. Default: false.
+            %   lineFreq        - Line frequency in Hz (60 US, 50 EU).
+            %       Default: 60.
             %
             % Supported formats:
             %   .mat — expects a 2-D numeric matrix [samples x channels] and
             %          a scalar Fs variable (searches for Fs/fs/srate/etc.).
             %          Falls back to an input dialog for Fs if not found.
-            %   .edf — requires MATLAB R2023a+ Signal Processing Toolbox
-            %          (edfread). Errors helpfully if unavailable.
+            %   .edf — custom direct-seek reader (no toolbox needed); prompts
+            %          for a time window and only reads chanNames channels,
+            %          so multi-GB long-term recordings are fine.
             %   .fif — requires FieldTrip (ft_read_header / ft_read_data)
             %          on the MATLAB path. Errors helpfully if unavailable.
             %
@@ -133,6 +140,13 @@ classdef sourceLocalizer < handle
             %     count mismatch                    → error.
             %
             % Dismiss the dialog to abort without changes.
+
+            p = inputParser;
+            addParameter(p, 'removeLineNoise', false, @(x) islogical(x) || isnumeric(x));
+            addParameter(p, 'lineFreq',        60,    @(x) isnumeric(x) && isscalar(x) && x > 0);
+            parse(p, varargin{:});
+            removeLineNoise = logical(p.Results.removeLineNoise);
+            lineFreq        = p.Results.lineFreq;
 
             [ts, Fs, chanNamesFromFile] = sourceLocalizer.loadTimeSeriesFromFile(self.chanNames);
 
@@ -179,6 +193,10 @@ classdef sourceLocalizer < handle
                         length(self.chanNames), nCh);
                 end
                 % else: existing chanNames match → fine
+            end
+
+            if removeLineNoise
+                ts = sourceLocalizer.notchFilterLineNoise(ts, Fs, lineFreq);
             end
 
             self.timeSeries = ts;
@@ -1250,7 +1268,7 @@ classdef sourceLocalizer < handle
             lengthData = size(deltaPositionLocal,2);
             sensorInds = self.sensors.sensorInds;
 
-            myBp = self.braindata.myBp;
+            [~, myBp] = self.retrieveBraindata;
 
             self.loadGeodesic;
 
@@ -1780,7 +1798,7 @@ classdef sourceLocalizer < handle
                     colorVals = cmap(colorVals,:);
 
                 case 'timing'
-                    cmap = parula;
+                    cmap = cool;
 
                     colorVals = zeros(size(a));
 
@@ -2110,6 +2128,19 @@ classdef sourceLocalizer < handle
 
     methods (Static = true)
 
+        function addToolboxToPath()
+            % Add the toolbox first (also makes removeClaudeWorktreesFromPath
+            % callable), then drop the .claude worktree copies genpath adds.
+            toolboxRoot = fileparts(mfilename('fullpath'));
+            addpath(genpath(toolboxRoot));
+            removeClaudeWorktreesFromPath();
+        end
+
+        function self = loadobj(self)
+            % load() bypasses the constructor, so set up the path here too.
+            sourceLocalizer.addToolboxToPath();
+        end
+
         function [spkLeads,spkTimes,startEndTime] = removeDuplicates(spkLeads,spkTimes,startEndTime)
 
             seriesMap = containers.Map('keyType','char','valueType','any');
@@ -2354,7 +2385,7 @@ classdef sourceLocalizer < handle
             %   .fif — reads header only via FieldTrip ft_read_header;
             %          accepts both head-only files (e.g. *-head.fif) and
             %          full data files. Requires FieldTrip on the path.
-            %   .edf — reads header only via edfinfo (R2023a+); no data loaded.
+            %   .edf — reads header only; no data loaded.
 
             chanNames = {};
 
@@ -2447,8 +2478,8 @@ classdef sourceLocalizer < handle
                 chanNames = hdr.label;
 
             elseif strcmpi(ext, '.edf')
-                info      = edfinfo(fullPath);
-                chanNames = cellstr(info.SignalLabels);
+                hdr       = sourceLocalizer.readEdfHeader(fullPath);
+                chanNames = hdr.labels(~hdr.isAnnot);
 
             else
                 error('Unsupported file type: %s. Use .mat, .csv, .fif, or .edf.', ext);
@@ -2464,6 +2495,41 @@ classdef sourceLocalizer < handle
                 chanNames = cellstr(chanNames);
             end
             chanNames = chanNames(:);
+        end
+
+        function ts = notchFilterLineNoise(ts, Fs, lineFreq, Q)
+            % Zero-phase IIR notch at lineFreq and its harmonics below
+            % Nyquist. ts is [samples x channels]. No toolbox required.
+            %   Q - notch quality factor (default 35; ~1.7 Hz wide at 60 Hz).
+            if nargin < 4, Q = 35; end
+            if isempty(ts), return; end
+
+            cls = class(ts);
+            x   = double(ts);
+
+            % Zero-fill NaNs so they don't poison the recursive filter
+            nanMask = isnan(x);
+            x(nanMask) = 0;
+
+            % Remove per-channel mean so the filter start-up transient is small
+            mu = mean(x, 1);
+            x  = x - mu;
+
+            freqs = lineFreq:lineFreq:(0.98 * Fs / 2);
+            for f = freqs
+                w     = 2 * pi * f / Fs;
+                alpha = sin(w) / (2 * Q);
+                b = [1, -2*cos(w), 1] / (1 + alpha);
+                a = [1, -2*cos(w) / (1 + alpha), (1 - alpha) / (1 + alpha)];
+                x = filter(b, a, x, [], 1);
+                x = flipud(filter(b, a, flipud(x), [], 1));   % zero-phase
+            end
+
+            x = x + mu;
+            x(nanMask) = NaN;
+            ts = cast(x, cls);
+            fprintf('[sourceLocalizer] Notch-filtered line noise at %g Hz (%d harmonic(s)).\n', ...
+                lineFreq, numel(freqs));
         end
 
         function [timeSeries, Fs, chanNames] = loadTimeSeriesFromFile(selectedChannels)
@@ -2582,65 +2648,223 @@ classdef sourceLocalizer < handle
             end
         end
 
-        function [ts, Fs, chanNames] = loadTsFromEdf(fullPath, selectedChannels)
-            % Load time series from an EDF file.
-            % Requires MATLAB R2020b+ Signal Processing Toolbox (edfread/edfinfo).
+        function [ts, Fs, chanNames] = loadTsFromEdf(fullPath, selectedChannels, window)
+            % Load (part of) an EDF/EDF+ file with a direct-seek reader.
+            % Does not use edfread/edfinfo, which scan every data record
+            % and exhaust memory on multi-GB long-term monitoring files.
             %
-            % selectedChannels — optional cell array of signal label strings.
-            %   When provided, only those channels are read from disk via
-            %   edfread 'SelectedSignals', which is significantly faster for
-            %   large EDF files with many unused channels.
+            % selectedChannels — optional cell array of signal labels; only
+            %   those signals are read. {} loads all (non-annotation) signals.
+            % window — optional [startSec endSec] relative to file start.
+            %   Omitted/empty: prompt the user (see promptEdfWindow).
+            %
+            % Returns ts [samples x channels] double (physical units).
             if nargin < 2, selectedChannels = {}; end
+            if nargin < 3, window = []; end
 
-            assert(exist('edfread', 'file') == 2, ...
-                ['edfread not found. EDF import requires MATLAB R2020b+ with the ' ...
-                 'Signal Processing Toolbox.']);
+            hdr = sourceLocalizer.readEdfHeader(fullPath);
 
-            % Use edfinfo for metadata — returns a stable struct across versions
-            info         = edfinfo(fullPath);
-            Fs           = double(info.NumSamples(1)) / seconds(info.DataRecordDuration);
-            allChanNames = cellstr(info.SignalLabels);
-
-            % Resolve which channels to load
+            % Resolve channels
             if ~isempty(selectedChannels)
-                [mask, ~] = ismember(strtrim(selectedChannels), strtrim(allChanNames));
+                selectedChannels = selectedChannels(:);
+                [mask, loc] = ismember(strtrim(selectedChannels), hdr.labels);
                 if ~all(mask)
-                    missing = selectedChannels(~mask);
                     warning('[loadTsFromEdf] %d requested channel(s) not found in EDF: %s', ...
-                        sum(~mask), strjoin(missing, ', '));
+                        sum(~mask), strjoin(selectedChannels(~mask), ', '));
                 end
-                toLoad    = selectedChannels(mask);
-                chanNames = toLoad(:);
-                fprintf('[loadTsFromEdf] Loading %d of %d channels from EDF (subset via chanNames).\n', ...
-                    numel(toLoad), numel(allChanNames));
+                sigIdx = loc(mask);
+                fprintf('[loadTsFromEdf] Loading %d of %d signals from EDF (subset via chanNames).\n', ...
+                    numel(sigIdx), hdr.nSignals);
             else
-                toLoad    = {};
-                chanNames = allChanNames;
+                sigIdx = find(~hdr.isAnnot);
+            end
+            assert(~isempty(sigIdx), '[loadTsFromEdf] No matching signals in %s.', fullPath);
+            chanNames = hdr.labels(sigIdx);
+            chanNames = chanNames(:);
+
+            % Resolve time window
+            if isempty(window)
+                window = sourceLocalizer.promptEdfWindow(hdr, numel(sigIdx));
+                if isempty(window)
+                    ts = []; Fs = []; chanNames = {};
+                    return;
+                end
+            end
+            [ts, Fs] = sourceLocalizer.readEdfWindow(hdr, sigIdx, window);
+        end
+
+        function hdr = readEdfHeader(fullPath)
+            % Parse an EDF/EDF+ header (first 256 + 256*ns bytes) only.
+            fid = fopen(fullPath, 'r', 'ieee-le');
+            assert(fid > 0, '[readEdfHeader] Cannot open %s', fullPath);
+            c = onCleanup(@() fclose(fid));
+
+            fixed = fread(fid, 256, 'uint8=>char')';
+            assert(numel(fixed) == 256, '[readEdfHeader] Not an EDF file: %s', fullPath);
+            hdr.path       = fullPath;
+            hdr.startDate  = strtrim(fixed(169:176));   % dd.mm.yy
+            hdr.startTime  = strtrim(fixed(177:184));   % hh.mm.ss
+            hdr.headerBytes= str2double(fixed(185:192));
+            hdr.nRecords   = str2double(fixed(237:244));
+            hdr.recDur     = str2double(fixed(245:252));
+            ns             = str2double(fixed(253:256));
+            hdr.nSignals   = ns;
+            assert(~any(isnan([hdr.headerBytes hdr.nRecords hdr.recDur ns])), ...
+                '[readEdfHeader] Malformed EDF header: %s', fullPath);
+
+            rd = @(w) strtrim(cellstr(reshape(fread(fid, ns*w, 'uint8=>char'), w, ns)'));
+            hdr.labels = rd(16);
+            rd(80); rd(8);                              % transducer, phys. dimension
+            physMin = str2double(rd(8)); physMax = str2double(rd(8));
+            digMin  = str2double(rd(8)); digMax  = str2double(rd(8));
+            rd(80);                                     % prefilter
+            hdr.nSamp = str2double(rd(8));
+            hdr.labels = hdr.labels(:);
+
+            hdr.gain   = (physMax - physMin) ./ (digMax - digMin);
+            hdr.offset = physMin - hdr.gain .* digMin;
+            hdr.isAnnot = strcmp(hdr.labels, 'EDF Annotations');
+            hdr.recSamples = sum(hdr.nSamp);
+            hdr.sigStart   = [0; cumsum(hdr.nSamp(1:end-1))];   % sample offset within record
+            hdr.fs = hdr.nSamp ./ hdr.recDur;
+            hdr.durationSec = hdr.nRecords * hdr.recDur;
+
+            % Fall back to file size if the record count is unknown (-1)
+            if hdr.nRecords < 0
+                d = dir(fullPath);
+                hdr.nRecords = floor((d.bytes - hdr.headerBytes) / (2 * hdr.recSamples));
+                hdr.durationSec = hdr.nRecords * hdr.recDur;
+            end
+        end
+
+        function [ts, Fs] = readEdfWindow(hdr, sigIdx, window)
+            % Read signals sigIdx over window [startSec endSec] by seeking
+            % directly to the needed data records.
+            r0 = max(0, floor(window(1) / hdr.recDur));
+            r1 = min(hdr.nRecords, ceil(window(2) / hdr.recDur));
+            assert(r1 > r0, '[readEdfWindow] Empty time window [%g %g] s (file is %g s).', ...
+                window(1), window(2), hdr.durationSec);
+
+            nSel = numel(sigIdx);
+            ns   = hdr.nSamp(sigIdx);
+            nRec = r1 - r0;
+            fprintf('[readEdfWindow] %d channels x %.1f s (~%.2f GB in memory)\n', ...
+                nSel, nRec * hdr.recDur, nSel * max(ns) * nRec * 8 / 2^30);
+
+            out = cell(1, nSel);
+            for k = 1:nSel, out{k} = zeros(ns(k) * nRec, 1); end
+
+            fid = fopen(hdr.path, 'r', 'ieee-le');
+            assert(fid > 0, '[readEdfWindow] Cannot open %s', hdr.path);
+            c = onCleanup(@() fclose(fid));
+            recBytes = 2 * hdr.recSamples;
+            fseek(fid, hdr.headerBytes + r0 * recBytes, 'bof');
+
+            chunk = 500;                                  % records per read (~17 MB here)
+            done  = 0;
+            while done < nRec
+                n   = min(chunk, nRec - done);
+                raw = fread(fid, [hdr.recSamples, n], 'int16=>double');
+                assert(size(raw, 2) == n, '[readEdfWindow] Unexpected end of file.');
+                for k = 1:nSel
+                    s   = sigIdx(k);
+                    blk = raw(hdr.sigStart(s) + (1:hdr.nSamp(s)), :);
+                    out{k}(done * ns(k) + (1:n * ns(k))) = ...
+                        blk(:) * hdr.gain(s) + hdr.offset(s);
+                end
+                done = done + n;
             end
 
-            % Use edfread for data — API varies by MATLAB version
-            try
-                % R2021b+: 'OutputFormat','array' returns [nSamples x nChan] double
-                if ~isempty(toLoad)
-                    data = edfread(fullPath, 'SelectedSignals', toLoad, 'OutputFormat', 'array');
+            % Channels may differ in rate; resample to the highest rate
+            Fs = max(hdr.fs(sigIdx));
+            nOut = max(cellfun(@numel, out));
+            ts = zeros(nOut, nSel);
+            for k = 1:nSel
+                if numel(out{k}) == nOut
+                    ts(:, k) = out{k};
                 else
-                    data = edfread(fullPath, 'OutputFormat', 'array');
+                    ts(:, k) = interp1(linspace(0, 1, numel(out{k})), out{k}, ...
+                        linspace(0, 1, nOut), 'linear');
                 end
-                ts = double(data);
-            catch
-                % R2020b fallback: returns timetable with one cell per record per channel
-                if ~isempty(toLoad)
-                    tbl = edfread(fullPath, 'SelectedSignals', toLoad);
-                else
-                    tbl = edfread(fullPath);
-                end
-                nChan = width(tbl);
-                cols  = cell(1, nChan);
-                for c = 1:nChan
-                    cols{c} = vertcat(tbl{:, c}{:});
-                end
-                ts = double(horzcat(cols{:}));
             end
+        end
+
+        function window = promptEdfWindow(hdr, nChan)
+            % Ask which part of the recording to load. Accepts seconds from
+            % file start, h:mm:ss, or a clock time "d2 00:38:37" (day N of the
+            % recording, then time of day). Returns
+            % [startSec endSec], or [] if cancelled.
+            fsMax    = max(hdr.fs(~hdr.isAnnot));
+            totalGB  = nChan * fsMax * hdr.durationSec * 8 / 2^30;
+            if totalGB <= 2
+                defEnd = hdr.durationSec;
+            else
+                defEnd = min(600, hdr.durationSec);
+            end
+            t0 = sourceLocalizer.edfClockToSec(hdr.startTime);
+            msg = { ...
+                sprintf('Recording: %.1f h, %d channels in file; reading %d of them.', ...
+                    hdr.durationSec/3600, numel(hdr.labels(~hdr.isAnnot)), nChan), ...
+                sprintf('Reading everything would need ~%.0f GB of memory, so choose a window.', totalGB), ...
+                '', ...
+                sprintf('Times are measured from the start of the file (%s %s). Enter seconds, h:mm:ss, or a clock time like "d2 00:38:37" (day 2, 00:38:37 clock time).', ...
+                    hdr.startDate, hdr.startTime)};
+            if totalGB <= 2, msg(2) = []; end
+            while true
+                ans_ = dlgInputNonModal(msg, 'EDF Time Window', ...
+                    {'Start:', 'End:'}, {'0', sprintf('%g', defEnd)});
+                if isempty(ans_), window = []; return; end
+                try
+                    w = [sourceLocalizer.parseEdfTime(ans_{1}, hdr), ...
+                         sourceLocalizer.parseEdfTime(ans_{2}, hdr)];
+                catch err
+                    dlgNonModal(err.message, 'EDF Time Window', 'OK');
+                    continue;
+                end
+                w = [max(w(1), 0), min(w(2), hdr.durationSec)];
+                gb = nChan * fsMax * (w(2) - w(1)) * 8 / 2^30;
+                if w(2) <= w(1)
+                    dlgNonModal('End must be after start (and within the file).', ...
+                        'EDF Time Window', 'OK');
+                elseif gb > 6
+                    dlgNonModal(sprintf(['That window needs ~%.1f GB. Choose a shorter window ' ...
+                        'or fewer channels.'], gb), 'EDF Time Window', 'OK');
+                else
+                    window = w;
+                    fprintf('[sourceLocalizer] EDF window: %.1f - %.1f s from file start (t0 = %s %s; %.0f s from midnight)\n', ...
+                        w(1), w(2), hdr.startDate, hdr.startTime, t0);
+                    return;
+                end
+            end
+        end
+
+        function sec = parseEdfTime(str, hdr)
+            % Seconds from file start. Accepts "123.5", "h:mm:ss", "d2 h:mm:ss".
+            str = strtrim(str);
+            tok = regexp(str, '^[dD](\d+)\s+(\d+):(\d+):(\d+(?:\.\d+)?)$', 'tokens', 'once');
+            if ~isempty(tok)
+                v   = str2double(tok);
+                clk = v(2)*3600 + v(3)*60 + v(4);
+                t0  = sourceLocalizer.edfClockToSec(hdr.startTime);
+                sec = (v(1) - 1) * 86400 + clk - t0;
+                return;
+            end
+            tok = regexp(str, '^(\d+):(\d+):(\d+(?:\.\d+)?)$', 'tokens', 'once');
+            if ~isempty(tok)
+                v = str2double(tok);
+                sec = v(1)*3600 + v(2)*60 + v(3);
+                return;
+            end
+            sec = str2double(str);
+            if isnan(sec)
+                error('Could not parse "%s". Use seconds, h:mm:ss, or "d2 00:38:37".', str);
+            end
+        end
+
+        function sec = edfClockToSec(startTime)
+            % Seconds from midnight of the EDF header start time (hh.mm.ss).
+            v   = sscanf(startTime, '%d.%d.%d')';
+            sec = v(1)*3600 + v(2)*60 + v(3);
         end
 
         function [ts, Fs, chanNames] = loadTsFromFif(fullPath)

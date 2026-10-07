@@ -102,6 +102,9 @@ classdef electrodeLocalizer < handle
             %   freesurfer_bin  - path to FreeSurfer bin directory
             %   afni_bin        - path to AFNI bin directory
 
+            % Add the toolbox first (also makes removeClaudeWorktreesFromPath
+            % callable), then drop the .claude worktree copies genpath adds.
+            addpath(genpath(fileparts(mfilename('fullpath'))));
             removeClaudeWorktreesFromPath();
 
             p = inputParser;
